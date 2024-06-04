@@ -8,7 +8,7 @@ import torch.nn as nn
 from ..util import box_ops
 from ..util.misc import NestedTensor, get_rank
 from .deformable_detr import DeformableDETR
-from .detr import DETR
+from .detr import DETR, Kine_transformer
 from .matcher import HungarianMatcher
 
 
@@ -257,8 +257,12 @@ class DETRTrackingBase(nn.Module):
                     prev_outputs_without_aux = {
                         k: v for k, v in prev_out.items() if 'aux_outputs' not in k}
                     prev_indices = self._matcher(prev_outputs_without_aux, prev_targets)
+                    device = prev_targets[0]['labels'].device
+                    new_prev_indices = []
+                    for idx_output, idx_target in prev_indices:
+                        new_prev_indices += [(idx_output.to(device), idx_target.to(device))]
 
-                    self.add_track_queries_to_targets(targets, prev_indices, prev_out)
+                    self.add_track_queries_to_targets(targets, new_prev_indices, prev_out)
             else:
                 # if not training we do not add track queries and evaluate detection performance only.
                 # tracking performance is evaluated by the actual tracking evaluation.
@@ -278,6 +282,12 @@ class DETRTrackingBase(nn.Module):
 
 
 # TODO: with meta classes
+class KineTracking(DETRTrackingBase, Kine_transformer):
+    def __init__(self, tracking_kwargs, detr_kwargs):
+        # DETR.__init__(self, **detr_kwargs)
+        Kine_transformer.__init__(self, **detr_kwargs)
+        DETRTrackingBase.__init__(self, **tracking_kwargs)
+
 class DETRTracking(DETRTrackingBase, DETR):
     def __init__(self, tracking_kwargs, detr_kwargs):
         DETR.__init__(self, **detr_kwargs)

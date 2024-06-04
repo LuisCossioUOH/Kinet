@@ -2,16 +2,19 @@
 """
 Backbone modules.
 """
-from typing import Dict, List
 
 import torch
-import torch.nn.functional as F
 import torchvision
+
 from torch import nn
+from typing import Dict, List
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.feature_pyramid_network import (FeaturePyramidNetwork,
                                                      LastLevelMaxPool)
 
+import torch.nn.functional as F
+
+from .transformer import _get_activation_fn
 from ..util.misc import NestedTensor, is_main_process
 from .position_encoding import build_position_encoding
 
@@ -62,9 +65,9 @@ class BackboneBase(nn.Module):
         super().__init__()
         for name, parameter in backbone.named_parameters():
             if (not train_backbone
-                or 'layer2' not in name
-                and 'layer3' not in name
-                and 'layer4' not in name):
+                    or 'layer2' not in name
+                    and 'layer3' not in name
+                    and 'layer4' not in name):
                 parameter.requires_grad_(False)
         if return_interm_layers:
             return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
@@ -90,6 +93,7 @@ class BackboneBase(nn.Module):
 
 class Backbone(BackboneBase):
     """ResNet backbone with frozen BatchNorm."""
+
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
@@ -103,6 +107,61 @@ class Backbone(BackboneBase):
         if dilation:
             self.strides[-1] = self.strides[-1] // 2
 
+
+class layer_backbone(nn.Module):
+    def __init__(self, input_dim, hidden_dim, activation='relu', dropout=0.1):
+
+        super(layer_backbone, self).__init__()
+        self.activation = _get_activation_fn(activation)
+        self.linear = nn.Linear(input_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+
+    def forward(self, x):
+        x = self.dropout(self.activation(self.linear(x)))
+        x = self.norm(x)
+        return x
+
+
+class Kine_Backbone(nn.Module):
+    def __init__(self, input_dim, hidden_dims, activation='relu', return_interm_layers=False):
+        super().__init__()
+        current_dim = input_dim
+        initial_dim = []
+        # self.num_layers = len(hidden_dims)
+        self.return_interm_layers = return_interm_layers
+        self.num_channels = hidden_dims
+        for i, dim in enumerate(hidden_dims):
+            initial_dim += [current_dim]
+            current_dim = dim
+
+        self.layers = nn.ModuleList(
+            [layer_backbone(initial_dim[i], hidden_dims[i], activation) for i in range(len(hidden_dims))])
+
+    def forward(self, x):
+
+        if self.return_interm_layers:
+            results_itnermediate = []
+        for i, l in enumerate(self.layers):
+            x = l(x)
+            if self.return_interm_layers:
+                results_itnermediate += [x]
+
+        if self.return_interm_layers:
+            return x, results_itnermediate
+
+        return x
+
+class Joiner_kine(nn.Sequential):
+    def __init__(self,backbone, position_embedding):
+        super().__init__(position_embedding, backbone)
+        self.num_channels = backbone.num_channels
+
+    def forward(self, tensor_list: NestedTensor):
+        embedding_pos = self[0](tensor_list)
+        out = self[1](embedding_pos).to(embedding_pos.tensors.dtype)
+        return out
 
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
@@ -118,17 +177,21 @@ class Joiner(nn.Sequential):
             out.append(x)
             # position encoding
             pos.append(self[1](x).to(x.tensors.dtype))
-
         return out, pos
 
-
 def build_backbone(args):
-    position_embedding = build_position_encoding(args)
-    train_backbone = args.lr_backbone > 0
+
     return_interm_layers = args.masks or (args.num_feature_levels > 1)
-    backbone = Backbone(args.backbone,
-                        train_backbone,
-                        return_interm_layers,
-                        args.dilation)
+    if args.kine:
+        backbone = Kine_Backbone(args.hidden_dim, hidden_dims=[288, 512], activation=args.activation,
+                                 return_interm_layers=return_interm_layers)
+        return backbone
+    else:
+        position_embedding = build_position_encoding(args)
+        train_backbone = args.lr_backbone > 0
+        backbone = Backbone(args.backbone,
+                            train_backbone,
+                            return_interm_layers,
+                            args.dilation)
     model = Joiner(backbone, position_embedding)
     return model

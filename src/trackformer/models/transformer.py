@@ -51,7 +51,11 @@ class Transformer(nn.Module):
         # flatten NxCxHxW to HWxNxC
         bs, c, h, w = src.shape
         src = src.flatten(2).permute(2, 0, 1)
+
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
+
+
+         # pos_embed = [flatten_dim,batch_size,n_frames] = []
         mask = mask.flatten(1)
 
         if tgt is None:
@@ -76,8 +80,8 @@ class Transformer(nn.Module):
                                            prev_frame=prev_frame)
 
         return (hs.transpose(1, 2),
-            hs_without_norm.transpose(1, 2),
-            memory.permute(1, 2, 0).view(bs, c, h, w))
+                hs_without_norm.transpose(1, 2),
+                memory.permute(1, 2, 0).view(bs, c, h, w))
 
 
 class TransformerEncoder(nn.Module):
@@ -183,7 +187,7 @@ class TransformerEncoderLayer(nn.Module):
         self.normalize_before = normalize_before
 
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
-        return tensor if pos is None else tensor + pos
+        return tensor if pos is None else tensor + pos  # pos = [n_frame,flatten_dim,hidden_dim], tensor = [n_frame, flatten_dim, hidden_dim]
 
     def forward_post(self,
                      src,
@@ -326,11 +330,12 @@ def _get_activation_fn(activation):
 def build_transformer(args):
     return Transformer(
         d_model=args.hidden_dim,
-        dropout=args.dropout,
         nhead=args.nheads,
-        dim_feedforward=args.dim_feedforward,
         num_encoder_layers=args.enc_layers,
         num_decoder_layers=args.dec_layers,
+        dim_feedforward=args.dim_feedforward,
+        dropout=args.dropout,
+        activation=args.activation,
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
         track_attention=args.track_attention

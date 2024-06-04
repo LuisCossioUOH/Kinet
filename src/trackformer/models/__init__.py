@@ -8,7 +8,7 @@ from .detr import DETR, PostProcess, SetCriterion
 from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
                                 DETRSegm, DETRSegmTracking,
                                 PostProcessPanoptic, PostProcessSegm)
-from .detr_tracking import DeformableDETRTracking, DETRTracking
+from .detr_tracking import DeformableDETRTracking, DETRTracking, KineTracking
 from .matcher import build_matcher
 from .transformer import build_transformer
 
@@ -18,7 +18,7 @@ def build_model(args):
         num_classes = 91
     elif args.dataset == 'coco_panoptic':
         num_classes = 250
-    elif args.dataset in ['coco_person', 'mot', 'mot_crowdhuman', 'crowdhuman', 'mot_coco_person']:
+    elif args.dataset in ['coco_person', 'mot', 'mot_crowdhuman', 'crowdhuman', 'mot_coco_person','mot_kine']:
         # num_classes = 91
         num_classes = 20
         # num_classes = 1
@@ -66,6 +66,17 @@ def build_model(args):
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
                 model = DeformableDETR(**detr_kwargs)
+    elif args.kine:
+        # detr_kwargs['multi_frame_attention'] = args.multi_frame_attention
+        # detr_kwargs['multi_frame_encoding'] = args.multi_frame_encoding
+        # detr_kwargs['merge_frame_features'] = args.merge_frame_features
+        transformer = build_transformer(args)
+        detr_kwargs['transformer'] = transformer
+
+        if args.tracking:
+            model = KineTracking(tracking_kwargs, detr_kwargs)
+        else:
+            raise("ERROR: Kine model only implemented as tracking model")
     else:
         transformer = build_transformer(args)
 

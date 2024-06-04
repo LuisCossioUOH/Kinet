@@ -164,7 +164,7 @@ class DeformableDETR(DETR):
 
         for frame, frame_feat in enumerate(frame_features):
             if self.multi_frame_attention and self.multi_frame_encoding:
-                pos_list.extend([p[:, frame] for p in pos[-3:]])
+                pos_list.extend([p[:, frame] for p in pos[-3:]]) # p = [batch_size, n_frames, hidden_dim, h, w]
             else:
                 pos_list.extend(pos[-3:])
 

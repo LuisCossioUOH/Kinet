@@ -304,7 +304,10 @@ class Tracker:
             target = [target]
 
         outputs, _, features, _, _ = self.obj_detector(img, target, self._prev_features[0])
-
+        # Output
+        # pred_logits: tensor batch_size x num_queries x num_class
+        # pred_boxes: tensor batch_size x num_queries x 4
+        # hs_embed: tensor batch_size x num_queries x hidden_dim
         hs_embeds = outputs['hs_embed'][0]
 
         results = self.obj_detector_post['bbox'](outputs, orig_size)
@@ -567,7 +570,7 @@ class Track(object):
         self.count_inactive = 0
         self.count_termination = 0
         self.gt_id = None
-        self.hs_embed = [hs_embed]
+        self.hs_embed = [hs_embed] # Hidden state embedding (HS)
         self.mask = mask
         self.attention_map = attention_map
         self.obj_ind = obj_ind

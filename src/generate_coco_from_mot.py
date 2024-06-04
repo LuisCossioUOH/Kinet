@@ -20,7 +20,7 @@ from torchvision.ops.boxes import box_iou
 
 from trackformer.datasets.tracking.mots20_sequence import load_mots_gt
 
-MOTS_ROOT = 'data/MOTS20'
+MOTS_ROOT = '/home/luis/2024/MOT/vid/MOT17'
 VIS_THRESHOLD = 0.25
 
 MOT_15_SEQS_INFO = {
@@ -105,13 +105,7 @@ def generate_coco_from_mot(split_name='train', seqs_names=None,
             if i == 0:
                 first_frame_image_id = img_id
 
-            annotations['images'].append({"file_name": f"{seq}_{img}",
-                                          "height": img_height,
-                                          "width": img_width,
-                                          "id": img_id,
-                                          "frame_id": i,
-                                          "seq_length": seq_length,
-                                          "first_frame_image_id": first_frame_image_id})
+            annotations['images'].append(get_annotation_id(seq,img, img_height, img_width,img_id,i,seq_length,first_frame_image_id))
 
             img_id += 1
 
@@ -263,6 +257,154 @@ def generate_coco_from_mot(split_name='train', seqs_names=None,
         json.dump(annotations, anno_file, indent=4)
 
 
+def get_annotation_id(seq, img_name, img_height, img_width, img_id, frame_id, seq_length, first_frame_image_id):
+    return {"file_name": f"{seq}_{img_name}",
+     "height": img_height,
+     "width": img_width,
+     "id": img_id,
+     "frame_id": frame_id,
+     "seq_length": seq_length,
+     "first_frame_image_id": first_frame_image_id}
+
+
+def generate_det_json_from_mot(split_name='train', seqs_names=None,
+                           root_split='train', mots=False,
+                           frame_range=None, data_root='data/MOT17',num_categories=1,names_categories=['person']):
+    """
+    Generates detection json data from MOT.
+    """
+
+    if frame_range is None:
+        frame_range = {'start': 0.0, 'end': 1.0}
+
+    if mots:
+        data_root = MOTS_ROOT
+    root_split_path = os.path.join(data_root, root_split)
+    root_split_mots_path = os.path.join(MOTS_ROOT, root_split)
+    coco_dir = os.path.join(data_root, split_name)
+
+    if os.path.isdir(coco_dir):
+        shutil.rmtree(coco_dir)
+
+    os.mkdir(coco_dir)
+
+    detections = {}
+    # if num_categories==1:
+    category_default = 1
+    detections['images'] = []
+    detections['annotations'] = []
+
+    detections['categories'] = [{"supercategory": name,
+                                 "name": name,
+                                 "id": i + 1} for i, name in enumerate(names_categories)]
+
+
+    detections_dir = os.path.join(os.path.join(data_root, 'annotations'))
+    if not os.path.isdir(detections_dir):
+        os.mkdir(detections_dir)
+    detection_file = os.path.join(detections_dir, f'{split_name}.json')
+
+    # IMAGE FILES
+    img_id = 0
+
+    seqs = sorted(os.listdir(root_split_path))
+    if seqs_names is not None:
+        seqs = [s for s in seqs if s in seqs_names]
+
+    for seq in seqs:
+        # CONFIG FILE
+        config = configparser.ConfigParser()
+        config_file = os.path.join(root_split_path, seq, 'seqinfo.ini')
+
+        if os.path.isfile(config_file):
+            config.read(config_file)
+            img_width = int(config['Sequence']['imWidth'])
+            img_height = int(config['Sequence']['imHeight'])
+            seq_length = int(config['Sequence']['seqLength'])
+        else:
+            img_width = MOT_15_SEQS_INFO[seq]['img_width']
+            img_height = MOT_15_SEQS_INFO[seq]['img_height']
+            seq_length = MOT_15_SEQS_INFO[seq]['seq_length']
+
+        seg_list_dir = os.listdir(os.path.join(root_split_path, seq, 'img1'))
+        start_frame = int(frame_range['start'] * seq_length)
+        end_frame = int(frame_range['end'] * seq_length)
+        seg_list_dir = seg_list_dir[start_frame: end_frame]
+
+        print(f"{seq}: {len(seg_list_dir)}/{seq_length}")
+        seq_length = len(seg_list_dir)
+
+        for i, img in enumerate(sorted(seg_list_dir)):
+            if i == 0:
+                first_frame_image_id = img_id
+            detections['images'].append(get_annotation_id(seq,img, img_height, img_width,img_id,i,seq_length,first_frame_image_id))
+            img_id += 1
+            os.symlink(os.path.join(os.getcwd(), root_split_path, seq, 'img1', img),
+                       os.path.join(coco_dir, f"{seq}_{img}"))
+
+
+
+    img_file_name_to_id = {
+        img_dict['file_name']: img_dict['id']
+        for img_dict in detections['images']}
+
+    seq_annotations_per_frame = {}
+    for seq in seqs:
+        # GT FILE
+        dt_file_path = os.path.join(root_split_path, seq, 'det', 'det.txt')
+        # if mots:
+        #     dt_file_path = os.path.join(
+        #         root_split_mots_path,
+        #         seq.replace('MOT17', 'MOTS20'),
+        #         'gt',
+        #         'gt.txt')
+        # if not os.path.isfile(dt_file_path):
+        #     continue
+
+        seq_detections = []
+
+        detection_id = 0
+        with open(dt_file_path, "r") as dt_file:
+            reader = csv.reader(dt_file, delimiter=' ' if mots else ',')
+
+            for row in reader:
+                bbox = [float(row[2]), float(row[3]), float(row[4]), float(row[5])]
+                bbox = [int(c) for c in bbox]
+                area = bbox[2] * bbox[3]
+                confidence = float(row[6])
+                frame_id = int(row[0])
+                image_id = img_file_name_to_id.get(f"{seq}_{frame_id:06d}.jpg", None)
+                if len(row)==8:
+                    category_det = row[7]
+                else:
+                    category_det = category_default
+
+
+
+                annotation = {
+                    "id": detection_id,
+                    "bbox": bbox,
+                    "image_id": image_id,
+                    "segmentation": [],
+                    'confidence':confidence,
+                    "area": area,
+                    # "iscrowd": 0,
+                    "seq": seq,
+                    "category_id": category_det}
+
+                seq_detections.append(annotation)
+                if frame_id not in seq_annotations_per_frame:
+                    seq_annotations_per_frame[frame_id] = []
+                seq_annotations_per_frame[frame_id].append(annotation)
+
+                detection_id += 1
+
+            detections['annotations'].extend(seq_detections)
+        # return detections
+        with open(detection_file, 'w') as anno_file:
+            json.dump(detections, anno_file, indent=4)
+
+
 def check_coco_from_mot(coco_dir='data/MOT17/mot17_train_coco', annotation_file='data/MOT17/annotations/mot17_train_coco.json', img_id=None):
     """
     Visualize generated COCO data. Only used for debugging.
@@ -292,16 +434,38 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate COCO from MOT.')
     parser.add_argument('--mots20', action='store_true')
     parser.add_argument('--mot20', action='store_true')
+    parser.add_argument('--detection', action='store_true')
     args = parser.parse_args()
-
+    args.data_root = MOTS_ROOT
     mot15_seqs_names = list(MOT_15_SEQS_INFO.keys())
 
-    if args.mots20:
+    if args.detection:
+        data_root = args.data_root
+        # split = 'train'
+        # generate_det_json_from_mot(f'mot17_{split}_det_FRCNN',
+        #                            seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN',
+        #                                        'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'],
+        #                            frame_range={'start': 0.0, 'end': 1.0},
+        #                            data_root=data_root)
+
+
+        generate_det_json_from_mot(
+            'mot17_train_cross_val_1_det',
+            data_root=data_root,
+            frame_range={'start': 0.0, 'end': 1.0},
+            seqs_names=['MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'])
+
+        generate_det_json_from_mot(
+            'mot17_val_cross_val_1_det',
+            data_root=data_root,
+            frame_range={'start': 0.0, 'end': 1.0},
+            seqs_names=['MOT17-02-FRCNN', 'MOT17-10-FRCNN'])
+
+
+    elif args.mots20:
         #
         # MOTS20
         #
-
-        # TRAIN SET
         generate_coco_from_mot(
             'mots20_train_coco',
             seqs_names=['MOTS20-02', 'MOTS20-05', 'MOTS20-09', 'MOTS20-11'],
@@ -357,53 +521,64 @@ if __name__ == '__main__':
         #
         # MOT17
         #
-
+        data_root = args.data_root
         # CROSS VAL SPLIT 1
         generate_coco_from_mot(
             'mot17_train_cross_val_1_coco',
-            seqs_names=['MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-11-FRCNN'])
+            data_root=data_root,
+            seqs_names=['MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'])
         generate_coco_from_mot(
             'mot17_val_cross_val_1_coco',
-            seqs_names=['MOT17-02-FRCNN', 'MOT17-10-FRCNN', 'MOT17-13-FRCNN'])
+            data_root=data_root,
+            seqs_names=['MOT17-02-FRCNN', 'MOT17-10-FRCNN'])
 
         # CROSS VAL SPLIT 2
         generate_coco_from_mot(
             'mot17_train_cross_val_2_coco',
-            seqs_names=['MOT17-02-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-10-FRCNN', 'MOT17-13-FRCNN'])
+            data_root=data_root,
+            seqs_names=['MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-10-FRCNN', 'MOT17-13-FRCNN'])
         generate_coco_from_mot(
             'mot17_val_cross_val_2_coco',
-            seqs_names=['MOT17-04-FRCNN', 'MOT17-11-FRCNN'])
+            data_root=data_root,
+            seqs_names=['MOT17-02-FRCNN', 'MOT17-11-FRCNN'])
 
         # CROSS VAL SPLIT 3
         generate_coco_from_mot(
             'mot17_train_cross_val_3_coco',
+            data_root=data_root,
             seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'])
         generate_coco_from_mot(
             'mot17_val_cross_val_3_coco',
+            data_root=data_root,
             seqs_names=['MOT17-05-FRCNN', 'MOT17-09-FRCNN'])
 
         # CROSS VAL FRAME SPLIT
         generate_coco_from_mot(
             'mot17_train_cross_val_frame_0_0_to_0_25_coco',
+            data_root=data_root,
             seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'],
             frame_range={'start': 0, 'end': 0.25})
         generate_coco_from_mot(
             'mot17_train_cross_val_frame_0_0_to_0_5_coco',
+            data_root=data_root,
             seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'],
             frame_range={'start': 0, 'end': 0.5})
         generate_coco_from_mot(
             'mot17_train_cross_val_frame_0_5_to_1_0_coco',
+            data_root=data_root,
             seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'],
             frame_range={'start': 0.5, 'end': 1.0})
 
         generate_coco_from_mot(
             'mot17_train_cross_val_frame_0_75_to_1_0_coco',
+            data_root=data_root,
             seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN', 'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'],
             frame_range={'start': 0.75, 'end': 1.0})
 
         # TRAIN SET
         generate_coco_from_mot(
             'mot17_train_coco',
+            data_root=data_root,
             seqs_names=['MOT17-02-FRCNN', 'MOT17-04-FRCNN', 'MOT17-05-FRCNN', 'MOT17-09-FRCNN',
                         'MOT17-10-FRCNN', 'MOT17-11-FRCNN', 'MOT17-13-FRCNN'])
 
@@ -415,7 +590,9 @@ if __name__ == '__main__':
 
             generate_coco_from_mot(
                 f'mot17_train_{i + 1}_coco',
+                data_root=data_root,
                 seqs_names=train_seqs)
             generate_coco_from_mot(
                 f'mot17_val_{i + 1}_coco',
+                data_root=data_root,
                 seqs_names=val_seqs)

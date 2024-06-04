@@ -66,7 +66,7 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
             'config.yaml')
         obj_detect_args = nested_dict_to_namespace(yaml.unsafe_load(open(obj_detect_config_path)))
         img_transform = obj_detect_args.img_transform
-        obj_detector, _, obj_detector_post = build_model(obj_detect_args)
+        obj_detector, _, obj_detector_post = build_model(obj_detect_args) # detector, criterion, post_processors
 
         obj_detect_checkpoint = torch.load(
             obj_detect_checkpoint_file, map_location=lambda storage, loc: storage)
@@ -129,6 +129,12 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
 
             for frame_id, frame_data in enumerate(tqdm.tqdm(seq_loader, file=sys.stdout)):
                 with torch.no_grad():
+                    # img: tensor size batch_sizex3,x750,1333
+                    #dets: batch_sizexN_detsx4
+                    #img_path: string to jpg
+                    #gt : {}
+                    #vis : {}
+                    #orig_size : tensor 1080 x 1920
                     tracker.step(frame_data)
 
             results = tracker.get_results()

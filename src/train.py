@@ -28,6 +28,7 @@ ex.add_named_config('crowdhuman', 'cfgs/train_crowdhuman.yaml')
 ex.add_named_config('mot_coco_person', 'cfgs/train_mot_coco_person.yaml')
 ex.add_named_config('mot17_crowdhuman', 'cfgs/train_mot17_crowdhuman.yaml')
 ex.add_named_config('mot17', 'cfgs/train_mot17.yaml')
+ex.add_named_config('detr_train', 'cfgs/train_detr.yaml')
 ex.add_named_config('mots20', 'cfgs/train_mots20.yaml')
 ex.add_named_config('mot20_crowdhuman', 'cfgs/train_mot20_crowdhuman.yaml')
 ex.add_named_config('coco_person_masks', 'cfgs/train_coco_person_masks.yaml')
@@ -154,7 +155,7 @@ def train(args: Namespace) -> None:
             checkpoint = torch.load(args.resume, map_location='cpu')
 
         model_state_dict = model_without_ddp.state_dict()
-        checkpoint_state_dict = checkpoint['model']
+        # checkpoint_state_dict = checkpoint['model']
         checkpoint_state_dict = {
             k.replace('detr.', ''): v for k, v in checkpoint['model'].items()}
 
@@ -269,7 +270,6 @@ def train(args: Namespace) -> None:
             output_dir, visualizers['val'], args, 0)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
-
         return
 
     print("Start training")

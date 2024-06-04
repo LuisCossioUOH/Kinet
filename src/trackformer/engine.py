@@ -85,7 +85,7 @@ def make_results(outputs, targets, postprocessors, tracking, return_only_orig=Tr
 
             if 'track_query_match_ids' in target and len(target['track_query_match_ids']):
                 track_queries_iou, _ = box_iou(
-                    target['boxes'][target['track_query_match_ids']],
+                    target['boxes'][target['track_query_match_ids'].cpu()].cpu(),
                     result['boxes'])
 
                 box_ids = [box_id
@@ -123,6 +123,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
         # in order to be able to modify targets inside the forward call we need
         # to pass it through as torch.nn.parallel.DistributedDataParallel only
         # passes copies
+        # print('image: ',samples.tensors.size())
         outputs, targets, *_ = model(samples, targets)
 
         loss_dict = criterion(outputs, targets)

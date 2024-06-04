@@ -1,12 +1,12 @@
 dataset: mot
 
-train_split: mot17_train_coco
-val_split: mot17_train_cross_val_frame_0_5_to_1_0_coco
+train_split: mot17_train_cross_val_1_coco
+val_split: mot17_val_cross_val_1_coco
 
-mot_path_train: data/MOT17
-mot_path_val: data/MOT17
+mot_path_train: /home/luis/2024/MOT/vid/MOT17 # data/MOT17
+mot_path_val: /home/luis/2024/MOT/vid/MOT17  # data/MOT17
 
-resume: models/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint_hidden_dim_288.pth
+ # models/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint_hidden_dim_288.pth
 
 epochs: 50
 lr_drop: 10

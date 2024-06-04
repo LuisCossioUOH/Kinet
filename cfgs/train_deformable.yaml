@@ -9,3 +9,5 @@ cls_loss_coef: 2.0
 set_cost_class: 2.0
 overflow_boxes: true
 with_box_refine: true
+activation: relu
+resume: models/mot_detr/r50_deformable_detr_plus_iterative_bbox_refinement-checkpoint_hidden_dim_288.pth

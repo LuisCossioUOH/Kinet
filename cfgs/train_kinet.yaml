@@ -1,0 +1,14 @@
+#kine: True
+dataset: mot_kine
+kine: True
+position_embedding: detection
+# DETR features
+multi_frame_encoding: False
+#encoding_dim_detections: 32
+track_prev_frame_range: 2
+num_queries: 500
+hidden_dim: 288
+#hidden_dims: [32,288]
+activation: relu
+
+resume: ''

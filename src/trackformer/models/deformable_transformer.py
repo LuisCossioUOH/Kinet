@@ -192,6 +192,8 @@ class DeformableTransformer(nn.Module):
             init_reference_out = reference_points
             pos_trans_out = self.pos_trans_norm(self.pos_trans(self.get_proposal_pos_embed(topk_coords_unact)))
             query_embed, tgt = torch.split(pos_trans_out, c, dim=2)
+
+
         else:
             query_embed, tgt = torch.split(query_embed, c, dim=1)
             query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1)
@@ -277,7 +279,7 @@ class DeformableTransformerEncoderLayer(nn.Module):
 
     @staticmethod
     def with_pos_embed(tensor, pos):
-        return tensor if pos is None else tensor + pos
+        return tensor if pos is None else tensor + pos # pos = [n_frame,flatten_dim,hidden_dim], tensor = [n_frame,flatten_dim,hidden_dim]
 
     def forward_ffn(self, src):
         src2 = self.linear2(self.dropout2(self.activation(self.linear1(src))))
@@ -323,7 +325,8 @@ class DeformableTransformerEncoder(nn.Module):
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):
             output = layer(output, pos, reference_points, spatial_shapes, padding_mask)
-
+        # spatial shape [4,2] ,
+        # valid_ratios [2, 4, 2]
         return output
 
 

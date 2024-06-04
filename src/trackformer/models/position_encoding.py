@@ -81,6 +81,7 @@ class PositionEmbeddingSine3D(nn.Module):
         return pos
 
 
+
 class PositionEmbeddingSine(nn.Module):
     """
     This is a more standard version of the position embedding, very similar to the one
@@ -151,6 +152,7 @@ class PositionEmbeddingLearned(nn.Module):
 def build_position_encoding(args):
     # n_steps = args.hidden_dim // 2
     # n_steps = args.hidden_dim // 4
+
     if args.multi_frame_attention and args.multi_frame_encoding:
         n_steps = args.hidden_dim // 3
         sine_emedding_func = PositionEmbeddingSine3D
@@ -161,6 +163,9 @@ def build_position_encoding(args):
     if args.position_embedding in ('v2', 'sine'):
         # TODO find a better way of exposing other arguments
         position_embedding = sine_emedding_func(n_steps, normalize=True)
+    elif args.position_embedding in 'detection':
+        position_embedding = sine_emedding_func(n_steps)
+
     elif args.position_embedding in ('v3', 'learned'):
         position_embedding = PositionEmbeddingLearned(n_steps)
     else:
