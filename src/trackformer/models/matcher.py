@@ -9,6 +9,76 @@ from torch import nn
 
 from ..util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 
+class BasicBoxHungarianMatcher:
+    """This class computes an assignment between the targets and detection inputs.
+
+    In this case, we do a 1-to-1 matching of the best
+    predictions, while the others are un-matched (and thus treated as non-objects).
+    """
+
+    def __init__(self, cost_class: float = 1, cost_bbox: float = 2, cost_giou: float = 2, use_class=False):
+        """Creates the matcher
+
+        Params:
+            cost_class: This is the relative weight of the classification error in the matching cost
+            cost_bbox: This is the relative weight of the L1 error of the bounding box coordinates
+                       in the matching cost
+            cost_giou: This is the relative weight of the giou loss of the bounding box in the
+                       matching cost
+        """
+        super().__init__()
+        self.cost_class = cost_class
+        self.cost_bbox = cost_bbox
+        self.cost_giou = cost_giou
+        self.use_class = use_class
+        assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
+
+
+    def __call__(self, detections, target):
+        """ Performs the matching
+
+        Params:
+            detections: This is a tensor of detections of shape [n_det, 5] or [n_det, 6], depending on wether or not
+            we are using classes as condition
+
+
+            target: This is a targer/dict contining:
+                 "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number
+                           of ground-truth objects in the target) containing the class labels
+                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
+
+
+        Returns:
+            A list of size batch_size, containing tuples of (index_i, index_j) where:
+                - index_i is the indices of the selected predictions (in order)
+                - index_j is the indices of the corresponding selected targets (in order)
+            For each batch element, it holds:
+                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
+        """
+
+        out_bbox = detections[:,:4]
+
+        tgt_ids = target['labels']
+        tgt_bbox = target["boxes"]
+
+        # Compute the L1 cost between boxes
+        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+
+        # Compute the giou cost betwen boxes
+        cost_giou = -generalized_box_iou(
+            box_cxcywh_to_xyxy(out_bbox),
+            box_cxcywh_to_xyxy(tgt_bbox))
+
+        # Final cost matrix
+        cost_matrix = self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
+
+        if self.use_class:
+            cost_class = (tgt_ids[None] != detections[:,5,None]).to(torch.int32)
+            cost_matrix += self.cost_class * cost_class
+        indices_detection, indices_target = linear_sum_assignment(cost_matrix.cpu())
+
+        return (torch.as_tensor(indices_target, dtype=torch.int64),
+                torch.as_tensor(indices_detection, dtype=torch.int64))
 
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
@@ -104,7 +174,7 @@ class HungarianMatcher(nn.Module):
         cost_matrix = cost_matrix.view(batch_size, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
-
+        #
         for i, target in enumerate(targets):
             if 'track_query_match_ids' not in target:
                 continue

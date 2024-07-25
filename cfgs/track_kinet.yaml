@@ -2,8 +2,8 @@ output_dir: runs # null
 verbose: false
 seed: 333
 
-obj_detect_checkpoint_file: models/mot17_crowdhuman_deformable_multi_frame/checkpoint_epoch_40.pth
-kinet: False
+obj_detect_checkpoint_file: 'models/mot17_kinet_multi_frame_local/checkpoint.pth'
+kinet: True
 
 interpolate: False
 # if available load tracking results and only evaluate

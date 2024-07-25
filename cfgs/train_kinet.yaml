@@ -1,14 +1,18 @@
 #kine: True
 dataset: mot_kine
-kine: True
+kinet: True
+output_dir: 'models/kinet'
+
 position_embedding: detection
 # DETR features
-multi_frame_encoding: False
-#encoding_dim_detections: 32
-track_prev_frame_range: 2
+multi_frame_encoding: True # True if track_prev_frame_range > 0
+track_prev_frame_range: 4
+encoding_dim_detections: 32
+encoding_dim_tracklets: 8
+use_encoding_tracklets: True
+track_query_false_negative_prob: 0.2
 num_queries: 500
 hidden_dim: 288
-#hidden_dims: [32,288]
 activation: relu
 
 resume: ''

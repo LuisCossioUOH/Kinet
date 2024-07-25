@@ -29,6 +29,7 @@ ex.add_named_config('mot_coco_person', 'cfgs/train_mot_coco_person.yaml')
 ex.add_named_config('mot17_crowdhuman', 'cfgs/train_mot17_crowdhuman.yaml')
 ex.add_named_config('mot17', 'cfgs/train_mot17.yaml')
 ex.add_named_config('detr_train', 'cfgs/train_detr.yaml')
+ex.add_named_config('kinet_train', 'cfgs/train_kinet.yaml')
 ex.add_named_config('mots20', 'cfgs/train_mots20.yaml')
 ex.add_named_config('mot20_crowdhuman', 'cfgs/train_mot20_crowdhuman.yaml')
 ex.add_named_config('coco_person_masks', 'cfgs/train_coco_person_masks.yaml')
@@ -294,6 +295,22 @@ def train(args: Namespace) -> None:
 
         checkpoint_paths = [output_dir / 'checkpoint.pth']
 
+        # MODEL SAVING
+        if args.output_dir:
+            if args.save_model_interval and not epoch % args.save_model_interval:
+                checkpoint_paths.append(output_dir / f"checkpoint_epoch_{epoch}.pth")
+
+            for checkpoint_path in checkpoint_paths:
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                    'vis_win_names': get_vis_win_names(visualizers),
+                    'best_val_stats': best_val_stats
+                }, checkpoint_path)
+
         # VAL
         if epoch == 1 or not epoch % args.val_interval:
             val_stats, _ = evaluate(
@@ -321,21 +338,7 @@ def train(args: Namespace) -> None:
                 if b_s == s:
                     checkpoint_paths.append(output_dir / f"checkpoint_best_{n}.pth")
 
-        # MODEL SAVING
-        if args.output_dir:
-            if args.save_model_interval and not epoch % args.save_model_interval:
-                checkpoint_paths.append(output_dir / f"checkpoint_epoch_{epoch}.pth")
 
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                    'vis_win_names': get_vis_win_names(visualizers),
-                    'best_val_stats': best_val_stats
-                }, checkpoint_path)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

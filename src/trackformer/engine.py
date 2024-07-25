@@ -119,7 +119,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, epoch)):
         samples = samples.to(device)
         targets = [utils.nested_dict_to_device(t, device) for t in targets]
-
+        # print(i)
         # in order to be able to modify targets inside the forward call we need
         # to pass it through as torch.nn.parallel.DistributedDataParallel only
         # passes copies
@@ -168,7 +168,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
                 results[0],
                 targets[0],
                 args.tracking)
-
+        if i > 50:
+            break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -204,7 +205,6 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 'Test:')):
         samples = samples.to(device)
         targets = [utils.nested_dict_to_device(t, device) for t in targets]
-
         outputs, targets, *_ = model(samples, targets)
 
         loss_dict = criterion(outputs, targets)
@@ -315,7 +315,8 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
         obj_detector_model = {
             'model': model_without_ddp,
             'post': postprocessors,
-            'img_transform': args.img_transform}
+            'img_transform': args.img_transform,
+            'obj_detect_args': args}
 
         config_updates = {
             'seed': None,

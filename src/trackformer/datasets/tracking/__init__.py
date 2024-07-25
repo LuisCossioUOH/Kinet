@@ -2,4 +2,4 @@
 """
 Submodule interface.
 """
-from .factory import TrackDatasetFactory
+from .factory import TrackDatasetFactory, TrackDatasetFactoryKinet

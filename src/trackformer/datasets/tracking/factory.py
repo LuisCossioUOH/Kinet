@@ -7,7 +7,8 @@ from typing import Union
 from torch.utils.data import ConcatDataset
 
 from .demo_sequence import DemoSequence
-from .mot_wrapper import MOT17Wrapper, MOT20Wrapper, MOTS20Wrapper
+from .mot_wrapper import MOT17Wrapper, MOT20Wrapper, MOTS20Wrapper, MOT17KinetWrapper
+from ..kinematic_utils import DetectionsEncoderSine
 
 DATASETS = {}
 
@@ -62,6 +63,33 @@ class TrackDatasetFactory:
                 self._data = DATASETS[dataset](kwargs)
             else:
                 self._data = ConcatDataset([self._data, DATASETS[dataset](kwargs)])
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getitem__(self, idx: int):
+        return self._data[idx]
+
+class TrackDatasetFactoryKinet:
+    """A central class to manage the individual dataset loaders for kinetic format of dataset.
+
+       This class contains the datasets. Once initialized the individual parts (e.g. sequences)
+       can be accessed.
+       """
+    def __init__(self,  datasets: Union[str, list], detection_encoder: DetectionsEncoderSine,  **kwargs):
+        if isinstance(datasets, str):
+            datasets = [datasets]
+        self._data = self.get_datasets(datasets, detection_encoder, **kwargs)
+
+    def get_datasets(self, datasets, detection_encoder, **kwargs):
+        datasets_seq = []
+
+        for name_seq in datasets:
+            name_dataset = name_seq.split('-')
+            split = name_dataset[1]
+            det = name_dataset[2]
+            datasets_seq += [MOT17KinetWrapper(split, detection_encoder, det, **kwargs)]
+        return ConcatDataset(datasets_seq)
 
     def __len__(self) -> int:
         return len(self._data)

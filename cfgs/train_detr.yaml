@@ -1,0 +1,7 @@
+# DETR features
+multi_frame_encoding: False
+num_queries: 500
+hidden_dim: 288
+activation: relu
+
+resume: ''

@@ -12,10 +12,11 @@ import tqdm
 import yaml
 from torch.utils.data import DataLoader
 
-from trackformer.datasets.tracking import TrackDatasetFactory
+from trackformer.datasets.tracking import TrackDatasetFactory, TrackDatasetFactoryKinet
 from trackformer.models import build_model
-from trackformer.models.tracker import Tracker
+from trackformer.models.tracker import Tracker, Tracker_Kinet
 from trackformer.util.misc import nested_dict_to_namespace
+from trackformer.datasets.kinematic_utils import DetectionsEncoderSine, IdentityDetectionEncoder
 from trackformer.util.track_utils import (evaluate_mot_accums, get_mot_accum,
                                           interpolate_tracks, plot_sequence)
 
@@ -24,6 +25,7 @@ mm.lap.default_solver = 'lap'
 ex = sacred.Experiment('track')
 ex.add_config('cfgs/track.yaml')
 ex.add_named_config('reid', 'cfgs/track_reid.yaml')
+ex.add_named_config('kinet', 'cfgs/track_kinet.yaml')
 
 
 @ex.automain
@@ -91,6 +93,7 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
         obj_detector = obj_detector_model['model']
         obj_detector_post = obj_detector_model['post']
         img_transform = obj_detector_model['img_transform']
+        obj_detect_args = obj_detector_model['obj_detect_args']
 
     if hasattr(obj_detector, 'tracking'):
         obj_detector.tracking()
@@ -98,15 +101,28 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
     track_logger = None
     if verbose:
         track_logger = _log.info
-    tracker = Tracker(
-        obj_detector, obj_detector_post, tracker_cfg,
-        generate_attention_maps, track_logger, verbose)
+    if obj_detect_args.kinet:
+        tracker = Tracker_Kinet(
+            obj_detector, obj_detector_post, tracker_cfg,obj_detect_args,
+            generate_attention_maps, track_logger, verbose)
+    else:
+        tracker = Tracker(
+            obj_detector, obj_detector_post, tracker_cfg,
+            generate_attention_maps, track_logger, verbose)
 
     time_total = 0
     num_frames = 0
     mot_accums = []
-    dataset = TrackDatasetFactory(
-        dataset_name, root_dir=data_root_dir, img_transform=img_transform)
+    if obj_detect_args.kinet:
+        if obj_detect_args.encoding_dim_detections:
+            detection_encoder = DetectionsEncoderSine(obj_detect_args.encoding_dim_detections)
+        else:
+            detection_encoder = IdentityDetectionEncoder()
+        dataset = TrackDatasetFactoryKinet(
+            dataset_name, detection_encoder, root_dir=data_root_dir, img_transform=img_transform)
+    else:
+        dataset = TrackDatasetFactory(
+            dataset_name, root_dir=data_root_dir, img_transform=img_transform)
 
     for seq in dataset:
         tracker.reset()

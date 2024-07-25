@@ -8,10 +8,11 @@ Copy-paste from torch.nn.Transformer with modifications:
     * decoder returns a stack of activations from all decoding layers
 """
 import copy
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
+
+from typing import Optional
 from torch import Tensor, nn
 
 
@@ -48,9 +49,9 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, src, mask, query_embed, pos_embed, tgt=None, prev_frame=None):
-        # flatten NxCxHxW to HWxNxC
+        # flatten BSxCxHxW to BSxCxHW
         bs, c, h, w = src.shape
-        src = src.flatten(2).permute(2, 0, 1)
+        src = src.flatten(2).permute(2, 0, 1) # permute BSxCxHW to HWxBSxC
 
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
 
@@ -82,6 +83,29 @@ class Transformer(nn.Module):
         return (hs.transpose(1, 2),
                 hs_without_norm.transpose(1, 2),
                 memory.permute(1, 2, 0).view(bs, c, h, w))
+
+class Kinematic_transformer(Transformer):
+
+    def forward(self, src, mask, query_embed, tgt=None, prev_frame=None):
+        bs, n_det, c = src.shape
+        src = src.permute(1, 0, 2)  # permute BSxTxC to TxBSxC
+
+         # pos_embed = [flatten_dim,batch_size,n_frames] = []
+        # mask = mask.flatten(2)
+
+        if tgt is None:
+            tgt = torch.zeros_like(query_embed)
+        memory = self.encoder(src, src_key_padding_mask=mask, pos=None)
+
+
+        hs, hs_without_norm = self.decoder(tgt, memory, memory_key_padding_mask=mask,
+                                           pos=None, query_pos=query_embed,
+                                           prev_frame=prev_frame)
+
+        return (hs.transpose(1, 2),
+                hs_without_norm.transpose(1, 2),
+                memory.permute(1, 2, 0).view(bs, c, n_det))
+
 
 
 class TransformerEncoder(nn.Module):
@@ -328,6 +352,18 @@ def _get_activation_fn(activation):
 
 
 def build_transformer(args):
+    if args.kinet:
+        return Kinematic_transformer(
+        d_model=args.hidden_dim,
+        nhead=args.nheads,
+        num_encoder_layers=args.enc_layers,
+        num_decoder_layers=args.dec_layers,
+        dim_feedforward=args.dim_feedforward,
+        dropout=args.dropout,
+        activation=args.activation,
+        normalize_before=args.pre_norm,
+        return_intermediate_dec=True,
+        track_attention=args.track_attention)
     return Transformer(
         d_model=args.hidden_dim,
         nhead=args.nheads,

@@ -18,7 +18,7 @@ from pycocotools.coco import COCO
 from .coco import build as build_coco
 from .crowdhuman import build_crowdhuman
 from .coco import CocoDetection, make_coco_transforms
-from .kinematic_utils import make_kine_transforms, ConvertCocoAnnsToTrack, DetectionsEncoderSine
+from .kinematic_utils import make_kine_transforms, ConvertCocoAnnsToTrack, DetectionsEncoderSine, NormalizeDetections
 
 import trackformer.datasets.transforms as T
 
@@ -121,7 +121,7 @@ class MOT(CocoDetection):
 class MOT_Kine(CocoDetection):
     def __init__(self, path_images: str, path_ann_file: str, path_detections: str, transforms, norm_transforms=None,
                  overflow_boxes=False, remove_no_obj_imgs=False, min_num_objects=0, prev_frame_range=1,
-                 use_classes=False, num_pos_feats=32):
+                 use_classes=False):
         super(MOT_Kine, self).__init__(path_images, path_ann_file, transforms, norm_transforms=norm_transforms,
                                        overflow_boxes=overflow_boxes, remove_no_obj_imgs=remove_no_obj_imgs,
                                        min_num_objects=min_num_objects)
@@ -258,7 +258,7 @@ class MOT_Kine(CocoDetection):
             detections, target = self._transforms(detections, target)
 
         detections, target = self._norm_transforms(detections, target)
-        return detections[None], target
+        return detections, target
 
     def write_result_files(self, results, output_dir, threshold=0.7):
         """Write the detections in the format for the MOT17Det sumbission
@@ -352,12 +352,12 @@ def build_mot(image_set, args):
 def build_mot_kine(image_set, args):
     if image_set == 'train':
         root = Path(args.mot_path_train)
-        prev_frame_rnd_augs = args.track_prev_frame_rnd_augs
+        # prev_frame_rnd_augs = args.track_prev_frame_rnd_augs
         prev_frame_range = args.track_prev_frame_range
     elif image_set == 'val':
         root = Path(args.mot_path_val)
-        prev_frame_rnd_augs = 0.0
-        prev_frame_range = 1
+        # prev_frame_rnd_augs = 0.0
+        prev_frame_range = args.track_prev_frame_range
     else:
         ValueError(f'unknown {image_set}')
 
@@ -370,8 +370,13 @@ def build_mot_kine(image_set, args):
     detections_file = root / f"annotations/{split.replace('coco', 'det')}.json"
     # transforms, norm_transforms = make_coco_transforms(
     #     image_set, args.img_transform, args.overflow_boxes)
-    transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
-                                                       use_sin_encoding=False)
+    if args.encoding_dim_detections:
+        transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
+                                                           use_sin_encoding=True,
+                                                           dim_encoding=args.encoding_dim_detections)
+    else:
+        transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
+                                                           use_sin_encoding=True)
 
     dataset = MOT_Kine(
         img_folder, ann_file, detections_file, transforms,

@@ -8,8 +8,8 @@ from .detr import DETR, PostProcess, SetCriterion
 from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
                                 DETRSegm, DETRSegmTracking,
                                 PostProcessPanoptic, PostProcessSegm)
-from .detr_tracking import DeformableDETRTracking, DETRTracking, KineTracking
-from .matcher import build_matcher
+from .detr_tracking import DeformableDETRTracking, DETRTracking, KinetTracking
+from .matcher import build_matcher, BasicBoxHungarianMatcher
 from .transformer import build_transformer
 
 
@@ -18,10 +18,14 @@ def build_model(args):
         num_classes = 91
     elif args.dataset == 'coco_panoptic':
         num_classes = 250
-    elif args.dataset in ['coco_person', 'mot', 'mot_crowdhuman', 'crowdhuman', 'mot_coco_person','mot_kine']:
+    elif args.dataset in ['coco_person', 'mot', 'mot_crowdhuman', 'crowdhuman', 'mot_coco_person']:
         # num_classes = 91
         num_classes = 20
         # num_classes = 1
+    elif args.dataset in ['mot_kine']:
+        # num_classes = 1
+        num_classes = 20
+        args.use_class = False
     else:
         raise NotImplementedError
 
@@ -66,15 +70,27 @@ def build_model(args):
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
                 model = DeformableDETR(**detr_kwargs)
-    elif args.kine:
+    elif args.kinet:
         # detr_kwargs['multi_frame_attention'] = args.multi_frame_attention
         # detr_kwargs['multi_frame_encoding'] = args.multi_frame_encoding
         # detr_kwargs['merge_frame_features'] = args.merge_frame_features
         transformer = build_transformer(args)
         detr_kwargs['transformer'] = transformer
+        if args.use_encoding_tracklets:
+            detr_kwargs['dim_tracklets'] = 4 * args.encoding_dim_tracklets * args.track_prev_frame_range
+        else:
+            detr_kwargs['dim_tracklets'] = 4 * args.track_prev_frame_range
+
+        tracking_kwargs['use_encoding'] = args.use_encoding_tracklets
+        tracking_kwargs['frame_range'] = args.track_prev_frame_range
+        tracking_kwargs['num_pos_feats'] = args.encoding_dim_tracklets
+        tracking_kwargs['matcher'] = BasicBoxHungarianMatcher(cost_class=args.set_cost_class,
+                                                              cost_bbox=args.set_cost_bbox,
+                                                              cost_giou=args.set_cost_giou,
+                                                              use_class=False)
 
         if args.tracking:
-            model = KineTracking(tracking_kwargs, detr_kwargs)
+            model = KinetTracking(tracking_kwargs, detr_kwargs)
         else:
             raise("ERROR: Kine model only implemented as tracking model")
     else:

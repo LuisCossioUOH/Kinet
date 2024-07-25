@@ -5,11 +5,10 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 
-from ..util import box_ops
-from ..util.misc import NestedTensor, get_rank
 from .deformable_detr import DeformableDETR
-from .detr import DETR, Kine_transformer
+from .detr import DETR, KineT
 from .matcher import HungarianMatcher
+from ..util.misc import NestedTensor
 
 
 class DETRTrackingBase(nn.Module):
@@ -48,13 +47,14 @@ class DETRTrackingBase(nn.Module):
         num_prev_target_ind_for_fps = 0
         if num_prev_target_ind:
             num_prev_target_ind_for_fps = \
-                torch.randint(int(math.ceil(self._track_query_false_positive_prob * num_prev_target_ind)) + 1, (1,)).item()
+                torch.randint(int(math.ceil(self._track_query_false_positive_prob * num_prev_target_ind)) + 1,
+                              (1,)).item()
 
         for i, (target, prev_ind) in enumerate(zip(targets, prev_indices)):
             prev_out_ind, prev_target_ind = prev_ind
 
             # random subset
-            if self._track_query_false_negative_prob: # and len(prev_target_ind):
+            if self._track_query_false_negative_prob:  # and len(prev_target_ind):
                 # random_subset_mask = torch.empty(len(prev_target_ind)).uniform_()
                 # random_subset_mask = random_subset_mask.ge(
                 #     self._track_query_false_negative_prob)
@@ -69,7 +69,6 @@ class DETRTrackingBase(nn.Module):
                 #     target['track_queries_fal_pos_mask'] = torch.zeros(self.num_queries).bool().to(device)
                 #     target['track_query_boxes'] = torch.zeros(0, 4).to(device)
                 #     target['track_query_match_ids'] = torch.tensor([]).long().to(device)
-
                 #     continue
 
                 prev_out_ind = prev_out_ind[random_subset_mask]
@@ -222,7 +221,7 @@ class DETRTrackingBase(nn.Module):
 
             # if self.training and random.uniform(0, 1) < 0.5:
             if self.training:
-            # if True:
+                # if True:
                 backprop_context = torch.no_grad
                 if self._backprop_prev_frame:
                     backprop_context = nullcontext
@@ -235,7 +234,8 @@ class DETRTrackingBase(nn.Module):
                         prev_prev_targets = [target['prev_prev_target'] for target in targets]
 
                         # PREV PREV
-                        prev_prev_out, _, prev_prev_features, _, _ = super().forward([t['prev_prev_image'] for t in targets])
+                        prev_prev_out, _, prev_prev_features, _, _ = super().forward(
+                            [t['prev_prev_image'] for t in targets])
 
                         prev_prev_outputs_without_aux = {
                             k: v for k, v in prev_prev_out.items() if 'aux_outputs' not in k}
@@ -276,17 +276,241 @@ class DETRTrackingBase(nn.Module):
                     target['track_query_boxes'] = torch.zeros(0, 4).to(device)
                     target['track_query_match_ids'] = torch.tensor([]).long().to(device)
 
-        out, targets, features, memory, hs  = super().forward(samples, targets, prev_features)
+        out, targets, features, memory, hs = super().forward(samples, targets, prev_features)
 
         return out, targets, features, memory, hs
 
 
-# TODO: with meta classes
-class KineTracking(DETRTrackingBase, Kine_transformer):
+class SineEncodingTracklet:
+    """
+    Position embeding for tracklets locations (range between [0,1]) very similar to the one
+    used by the Attention is all you need paper, applied to detections [N_det, 4]
+    """
+
+    def __init__(self, num_pos_feats=64, temperature=10000, scale=None):
+        super().__init__()
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        if scale is None:
+            scale = 2 * math.pi
+        self.scale = scale
+
+    def __call__(self, x):
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+        freq = (x[:, :, :, None] * torch.pi * 2) / dim_t
+        embed_coord = torch.concatenate([freq[:, :, :, 0::2].cos(), freq[:, :, :, 1::2].sin()], dim=3)
+        embed_coord = embed_coord.flatten(1)
+
+        return embed_coord
+
+
+class IdentityEncoding:
+    def __init__(self):
+        pass
+
+    def __call__(self, x):
+        x = x.flatten(2)
+        return x
+
+
+def generate_pseudo_tracklets(detections, n_frames):
+    pseudo_tracklets = torch.tile(detections[:, None, :4], [1, n_frames, 1])
+    return pseudo_tracklets
+
+
+class KinetTrackingBase(nn.Module):
+
+    def __init__(self,
+                 track_query_false_positive_prob: float = 0.0,
+                 track_query_false_negative_prob: float = 0.0,
+                 matcher: HungarianMatcher = None,
+                 backprop_prev_frame=False,
+                 ratio_add_detections=0.5,
+                 frame_range=5,
+                 use_encoding=True,
+                 num_pos_feats=32,
+                 ):
+        self._matcher = matcher
+        self._track_query_false_positive_prob = track_query_false_positive_prob
+        self._track_query_false_negative_prob = track_query_false_negative_prob
+        self._backprop_prev_frame = backprop_prev_frame
+        self._ratio_add_detections = ratio_add_detections
+        self._frame_range = frame_range
+        if use_encoding:
+            self._embed_tracklets = SineEncodingTracklet(num_pos_feats)
+            self.dim_tracklets = 4 * num_pos_feats * frame_range
+        else:
+            self._embed_tracklets = IdentityEncoding()
+            self.dim_tracklets = 4 * frame_range
+        self._tracking = False
+
+    def train(self, mode: bool = True):
+        """Sets the module in train mode."""
+        self._tracking = False
+        return super().train(mode)
+
+    def tracking(self):
+        """Sets the module in tracking mode."""
+        self.eval()
+        self._tracking = True
+
+    def add_positive_detections_to_tracklets(self, target, detections, tracks_indices, det_ind, ):
+        picked_indices = self._ratio_add_detections > torch.rand([len(tracks_indices)])
+        replace_track_indices = tracks_indices[picked_indices]
+        replace_det_indices = det_ind[picked_indices]
+        pseudo_tracklets = generate_pseudo_tracklets(detections[replace_det_indices], self._frame_range)
+        target['tracklets_modified'][replace_track_indices] = pseudo_tracklets
+
+    def get_minimun_tracks(self, targets):
+        indices_targets_matched = []
+        indices_detections_matched = []
+        for target in targets:
+            detections = target['detections'][:, :4]
+            tracks_indices, det_ind = self._matcher(detections, target)
+            indices_targets_matched += [tracks_indices]
+            indices_detections_matched += [det_ind]
+
+        min_prev_target_ind = min([len(indices_det) for indices_det in indices_detections_matched])
+        num_min_target_ind = 0
+        if min_prev_target_ind:
+            num_min_target_ind = torch.randint(0, min_prev_target_ind + 1, (1,)).item()
+        return num_min_target_ind, indices_targets_matched, indices_detections_matched
+
+    def add_track_queries_to_targets(self, targets, samples, add_false_pos=True):
+        device = targets[0]['boxes'].device
+        # n_frames = len(targets[0]['tracklets'])
+
+        # num_detections = min([len(targets['detections'])])
+        num_targets_ind, indices_matched_targets, indices_matched_dets = self.get_minimun_tracks(targets)
+
+        num_prev_target_ind_for_fps = 0
+        if num_targets_ind:
+            num_prev_target_ind_for_fps = \
+                torch.randint(int(math.ceil(self._track_query_false_positive_prob * num_targets_ind)) + 1, (1,)).item()
+            remaining_detections = min([len(target['detections']) - num_targets_ind for target in targets])
+            num_prev_target_ind_for_fps = min(num_prev_target_ind_for_fps, remaining_detections)
+
+        # if self._track_query_false_negative_prob > random.random() and num_targets_ind > 2:
+        #     false_negative = True
+        #     n_positives = torch.randint(1, num_targets_ind - 1, [1])[0]
+
+        for i, (target) in enumerate(targets):
+            # prev_det_ind, prev_tracks_ind = prev_ind
+            detections = target['detections']
+
+            tracks_indices = indices_matched_targets[i]
+            det_ind = indices_matched_dets[i]
+            subset_matches = torch.randperm(len(tracks_indices))[:num_targets_ind]
+            tracks_indices = tracks_indices[subset_matches]
+            det_ind = det_ind[subset_matches]
+            target['tracklets_modified'] = target['tracklets'].clone().permute(1, 0, 2)
+
+            # if false_negative:
+            #     tracks_indices = tracks_indices[:n_positives]
+            #     random_subset_mask = torch.randperm(len(tracks_indices))[:n_positives]
+            #     det_ind = det_ind[random_subset_mask]
+
+            self.add_positive_detections_to_tracklets(target, detections, tracks_indices, det_ind)
+
+            # detected prev frame tracks
+            # track_ids = target['track_ids'][tracks_indices]
+            # target['track_query_match_ids'] = track_ids
+
+            target['track_query_match_ids'] = tracks_indices
+            if add_false_pos:
+                tracklets_indices, tracks_matching_mask, \
+                track_queries_fal_pos_mask = self.add_false_positives(target, detections, tracks_indices, det_ind,
+                                                                      device,
+                                                                      num_prev_target_ind_for_fps)
+            else:
+                tracklets_indices = tracks_indices
+                track_queries_fal_pos_mask = torch.tensor([False, ] * len(tracklets_indices)).bool().to(device)
+                tracks_matching_mask = torch.tensor([True, ] * len(track_queries_fal_pos_mask)).bool().to(device)
+
+            self.update_query_embeddings(target, tracklets_indices, device, track_queries_fal_pos_mask,
+                                         tracks_matching_mask)
+
+    def update_query_embeddings(self, target, tracklets_indices, device, track_queries_fal_pos_mask,
+                                track_queries_mask):
+        # set tracklets embedding info
+        target['track_query_hs_embeds'] = self._embed_tracklets(target['tracklets_modified'][tracklets_indices])
+        # target['track_query_boxes'] = prev_out['pred_boxes'][i, prev_out_ind].detach()
+        target['track_queries_mask'] = torch.cat([
+            track_queries_mask,
+            torch.tensor([False, ] * self.num_queries).to(device)
+        ]).bool()
+        target['track_queries_fal_pos_mask'] = torch.cat([
+            track_queries_fal_pos_mask,
+            torch.tensor([False, ] * self.num_queries).to(device)
+        ]).bool()
+
+    def add_false_positives(self, target, detections, track_indices, det_indices, device, num_target_ind_for_fps):
+
+        fps_det_indidces = torch.arange(detections.size()[0])
+        fps_det_indidces = [
+            ind.item()
+            for ind in fps_det_indidces
+            if ind not in det_indices]
+        if len(fps_det_indidces):
+            detections_ind_for_fps = torch.randint(0, len(fps_det_indidces), [num_target_ind_for_fps])
+
+            pseudo_tracklets = generate_pseudo_tracklets(detections[torch.tensor(fps_det_indidces)[detections_ind_for_fps]],
+                                                         self._frame_range)
+
+            tracklets_indices = torch.tensor(track_indices.tolist() + \
+                                             [i for i in range(len(target['tracklets_modified']),
+                                                               len(target['tracklets_modified']) + \
+                                                               num_target_ind_for_fps)], dtype=torch.int64).to(device)
+
+            target['tracklets_modified'] = torch.cat([target['tracklets_modified'], pseudo_tracklets], dim=0)
+            fps_tracks_matching = torch.tensor(
+                [False, ] * len(track_indices) + [True, ] * num_target_ind_for_fps).bool().to(device)
+            tracks_matching = torch.ones_like(fps_tracks_matching).bool().to(device)
+            tracks_matching[fps_tracks_matching] = False
+
+            return tracklets_indices, tracks_matching, fps_tracks_matching
+        tracks_matching = torch.ones_like(track_indices).bool().to(device)
+        fps_tracks_matching = torch.zeros_like(track_indices).bool().to(device)
+        return track_indices, tracks_matching, fps_tracks_matching
+
+    def forward(self, samples: NestedTensor, targets: list = None):
+        if targets is not None and not self._tracking:
+            # tracklets = [target['tracklets'] for target in targets]
+
+            # if self.training and random.uniform(0, 1) < 0.5:
+            if self.training:
+                backprop_context = torch.no_grad
+                if self._backprop_prev_frame:
+                    backprop_context = nullcontext
+
+                with backprop_context():
+                    self.add_track_queries_to_targets(targets, samples)
+
+            else:
+                # if not training we do not add track queries and evaluate detection performance only.
+                # tracking performance is evaluated by the actual tracking evaluation.
+                for target in targets:
+                    device = target['boxes'].device
+
+                    # if self._use_encoding:
+                    target['track_query_hs_embeds'] = torch.zeros([0, self.dim_tracklets]).to(device)
+                    # target['track_queries_placeholder_mask'] = torch.zeros(self.num_queries).bool().to(device)
+                    target['track_queries_mask'] = torch.zeros(self.num_queries).bool().to(device)
+                    target['track_queries_fal_pos_mask'] = torch.zeros(self.num_queries).bool().to(device)
+                    # target['track_query_boxes'] = torch.zeros(0, 4).to(device)
+                    target['track_query_match_ids'] = torch.tensor([]).long().to(device)
+
+        out, targets, features, memory, hs = super().forward(samples, targets)
+
+        return out, targets, features, memory, hs
+
+
+class KinetTracking(KinetTrackingBase, KineT):
     def __init__(self, tracking_kwargs, detr_kwargs):
-        # DETR.__init__(self, **detr_kwargs)
-        Kine_transformer.__init__(self, **detr_kwargs)
-        DETRTrackingBase.__init__(self, **tracking_kwargs)
+        KineT.__init__(self, **detr_kwargs)
+        KinetTrackingBase.__init__(self, **tracking_kwargs)
+
 
 class DETRTracking(DETRTrackingBase, DETR):
     def __init__(self, tracking_kwargs, detr_kwargs):

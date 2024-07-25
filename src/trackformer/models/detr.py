@@ -18,7 +18,7 @@ class DETR(nn.Module):
     """ This is the DETR module that performs object detection. """
 
     def __init__(self, backbone, transformer, num_classes, num_queries,
-                 aux_loss=False, overflow_boxes=False, multi_frame_encoding=False,multi_frame_attention=False,
+                 aux_loss=False, overflow_boxes=False, multi_frame_encoding=False, multi_frame_attention=False,
                  merge_frame_features=False):
         """ Initializes the model.
         Parameters:
@@ -52,7 +52,6 @@ class DETR(nn.Module):
         self.multi_frame_attention = multi_frame_attention
         self.merge_frame_features = merge_frame_features
 
-
     @property
     def hidden_dim(self):
         """ Returns the hidden feature dimension size. """
@@ -64,7 +63,7 @@ class DETR(nn.Module):
         return self.backbone.num_channels[:3][::-1]
         # return [1024, 512, 256]
 
-    def forward(self, samples: NestedTensor, targets: list = None,prev_features=None):
+    def forward(self, samples: NestedTensor, targets: list = None, prev_features=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W],
@@ -119,7 +118,7 @@ class DETR(nn.Module):
 
         assert mask is not None
         if self.multi_frame_encoding:
-            pos_embed = [pos[:,i] for i in range(pos.size()[1])]
+            pos_embed = [pos[:, i] for i in range(pos.size()[1])]
             pos_embed = [pos_embed.flatten(2).permute(0, 2, 1)]
             pos = torch.cat(pos_embed, 1)
 
@@ -149,10 +148,12 @@ class DETR(nn.Module):
         return [{'pred_logits': a, 'pred_boxes': b}
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
-class Kine_transformer(nn.Module):
+
+class KineT(nn.Module):
     """ This is the Kine module that performs tracking trough detections """
 
     def __init__(self, backbone, transformer, num_classes, num_queries, aux_loss=False, overflow_boxes=False,
+                 dim_tracklets=256,
                  #  multi_frame_encoding=False,multi_frame_attention=False,
                  # merge_frame_features=False
                  ):
@@ -169,12 +170,13 @@ class Kine_transformer(nn.Module):
 
         self.num_queries = num_queries
         self.transformer = transformer
-        # self.overflow_boxes = overflow_boxes
+        self.overflow_boxes = overflow_boxes
         self.class_embed = nn.Linear(self.hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
         self.query_embed = nn.Embedding(num_queries, self.hidden_dim)
 
         # match interface with deformable DETR
+        self.input_proj_tracklets = MLP(dim_tracklets, self.hidden_dim, self.hidden_dim, 3)
         # self.input_proj = nn.Conv2d(backbone.num_channels[-1], self.hidden_dim, kernel_size=1)
         # self.input_proj = nn.ModuleList([
         #     nn.Sequential(
@@ -182,11 +184,11 @@ class Kine_transformer(nn.Module):
         #     )])
 
         self.backbone = backbone
-        # self.aux_loss = aux_loss
+        self.aux_loss = aux_loss
+
         # self.multi_frame_encoding = multi_frame_encoding
         # self.multi_frame_attention = multi_frame_attention
         # self.merge_frame_features = merge_frame_features
-
 
     @property
     def hidden_dim(self):
@@ -199,7 +201,7 @@ class Kine_transformer(nn.Module):
         return self.backbone.num_channels[:3][::-1]
         # return [1024, 512, 256]
 
-    def forward(self, samples: NestedTensor, targets: list = None,prev_features=None):
+    def forward(self, samples: NestedTensor, targets: list = None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W],
@@ -220,20 +222,19 @@ class Kine_transformer(nn.Module):
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
 
-        features, pos = self.backbone(samples)
+        features = self.backbone(samples)
 
-        src, mask = features[-1].decompose()
+        src, mask = features.decompose()
         # src = self.input_proj[-1](src)
-        src = self.input_proj(src)
-        pos = pos[-1]
+        # src = self.input_proj(features)
+        # pos = pos[-1]
 
-        batch_size, _, _, _ = src.shape
+        batch_size = src.size()[0]
 
         query_embed = self.query_embed.weight
         query_embed = query_embed.unsqueeze(1).repeat(1, batch_size, 1)
         tgt = None
-        if targets is not None and 'track_query_hs_embeds' in targets[0]:
-            # [BATCH_SIZE, NUM_PROBS, 4]
+        if targets is not None and (len(targets[0]['track_query_hs_embeds'])> 0):
             track_query_hs_embeds = torch.stack([t['track_query_hs_embeds'] for t in targets])
 
             num_track_queries = track_query_hs_embeds.shape[1]
@@ -247,22 +248,21 @@ class Kine_transformer(nn.Module):
                 query_embed], dim=0)
 
             tgt = torch.zeros_like(query_embed)
-            tgt[:num_track_queries] = track_query_hs_embeds.transpose(0, 1)
+            tgt[:num_track_queries] = self.input_proj_tracklets(track_query_hs_embeds.transpose(0, 1))
 
-            for i, target in enumerate(targets):
-                target['track_query_hs_embeds'] = tgt[:, i]
-
-        assert mask is not None
-        if self.multi_frame_encoding:
-            pos_embed = [pos[:,i] for i in range(pos.size()[1])]
-            pos_embed = [pos_embed.flatten(2).permute(0, 2, 1)]
-            pos = torch.cat(pos_embed, 1)
+            # for i, target in enumerate(targets):
+            #     target['track_query_hs_embeds'] = tgt[:, i]
+            # tgt += query # try no query embed
+        # assert mask is not None
+        # if self.multi_frame_encoding:
+        #     pos_embed = [pos[:, i] for i in range(pos.size()[1])]
+        #     pos_embed = [pos_embed.flatten(2).permute(0, 2, 1)]
+        #     pos = torch.cat(pos_embed, 1)
 
         # else:
         #     pos = pos[:, 0]
-
         hs, hs_without_norm, memory = self.transformer(
-            src, mask, query_embed, pos, tgt)
+            src, mask, query_embed, tgt)
 
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
@@ -285,13 +285,13 @@ class Kine_transformer(nn.Module):
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
-
 class SetCriterion(nn.Module):
     """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
+
     def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses,
                  focal_loss, focal_alpha, focal_gamma, tracking, track_query_false_positive_eos_weight):
         """ Create the criterion.
@@ -377,7 +377,7 @@ class SetCriterion(nn.Module):
                                             dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
-        target_classes_onehot = target_classes_onehot[:,:,:-1]
+        target_classes_onehot = target_classes_onehot[:, :, :-1]
 
         # query_mask = None
         # if self.tracking:
@@ -387,7 +387,7 @@ class SetCriterion(nn.Module):
         loss_ce = sigmoid_focal_loss(
             src_logits, target_classes_onehot, num_boxes,
             alpha=self.focal_alpha, gamma=self.focal_gamma)
-            # , query_mask=query_mask)
+        # , query_mask=query_mask)
 
         # if self.tracking:
         #     mean_num_queries = torch.tensor([len(m.nonzero()) for m in query_mask]).float().mean()
@@ -592,168 +592,6 @@ class SetCriterion(nn.Module):
 
         return losses
 
-class TrackDETR(DETR):
-    """ This is the DETR module for multi-object tracking."""
-    def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels,
-                 aux_loss=True, with_box_refine=False, two_stage=False, overflow_boxes=False,
-                 multi_frame_attention=False, multi_frame_encoding=False, merge_frame_features=False):
-        """ Initializes the model.
-        Parameters:
-            backbone: torch module of the backbone to be used. See backbone.py
-            transformer: torch module of the transformer architecture. See transformer.py
-            num_classes: number of object classes
-            num_queries: number of object queries, ie detection slot. This is the maximal
-                         number of objects DETR can detect in a single image. For COCO,
-                         we recommend 100 queries.
-            aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
-            with_box_refine: iterative bounding box refinement
-            two_stage: two-stage Deformable DETR
-        """
-        super().__init__(backbone, transformer, num_classes, num_queries, aux_loss)
-        self.multi_frame_attention = multi_frame_attention
-        self.multi_frame_encoding = multi_frame_encoding
-        self.merge_frame_features = merge_frame_features
-
-
-        self.input_proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(backbone.num_channels[-1], self.hidden_dim, kernel_size=1)
-            )])
-
-        self.multi_frame_attention = multi_frame_attention
-        self.multi_frame_encoding = multi_frame_encoding
-        self.merge_frame_features = merge_frame_features
-
-        if self.merge_frame_features:
-            self.merge_features = nn.Conv2d(self.hidden_dim * 2, self.hidden_dim, kernel_size=1)
-
-        self.input_proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(backbone.num_channels[-1], self.hidden_dim, kernel_size=1)
-            )])
-
-        self.multi_frame_attention = multi_frame_attention
-        self.multi_frame_encoding = multi_frame_encoding
-        self.merge_frame_features = merge_frame_features
-
-        if self.merge_frame_features:
-            self.merge_features = nn.Conv2d(self.hidden_dim * 2, self.hidden_dim, kernel_size=1)
-
-
-    def forward(self, samples: NestedTensor, targets: list = None, prev_features=None):
-        """ The forward expects a NestedTensor, which consists of:
-            @param samples: tensor for data samples
-               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W],
-                               containing 1 on padded pixels
-            @param targets: list of target data samples  (length 2)
-                - targets[0]['boxes'] = coordinates of the targets
-                - targets[0]['labels'] = class id
-                - targets[0]['image id'] = image id
-                ....
-            @param prev_features
-
-            @return: Output dict of predictions
-               - "pred_logits": the classification logits (including no-object) for all queries.
-                                Shape= [batch_size x num_queries x (num_classes + 1)]
-               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                               (center_x, center_y, height, width). These values are normalized
-                               in [0, 1], relative to the size of each individual image
-                               (disregarding possible padding). See PostProcess for information
-                               on how to retrieve the unnormalized bounding box.
-               - "aux_outputs": Optional, only returned when auxilary losses are activated. It
-                                is a list of dictionaries containing the two above keys for
-                                each decoder layer.
-
-
-        """
-        if not isinstance(samples, NestedTensor):
-            samples = nested_tensor_from_tensor_list(samples)
-
-        features, pos = self.backbone(samples)  # features  + positional embedding
-
-        features_all = features
-        features = features[-1]
-
-        if prev_features is None:
-            prev_features = features
-        else:
-            prev_features = prev_features[-1]
-
-        src_list = []
-        mask_list = []
-        pos_list = []
-
-        frame_features = [prev_features, features]
-        if not self.multi_frame_attention:
-            frame_features = [features]
-
-        for frame, frame_feat in enumerate(frame_features):
-            if self.multi_frame_attention and self.multi_frame_encoding:
-                pos_list.append(pos[-1][:, frame])
-            else:
-                pos_list.append(pos[-1])
-
-            # for l, feat in enumerate(frame_feat):
-            # src, mask = feat.decompose()
-            src, mask = frame_feat.decompose()
-
-            if self.merge_frame_features:
-                prev_src, _ = prev_features.decompose()
-                src_list.append(self.merge_features(torch.cat([self.input_proj[0](src), self.input_proj[0](prev_src)],
-                                                              dim=1)))
-            else:
-                src_list.append(self.input_proj[0](src))
-
-            mask_list.append(mask)
-            assert mask is not None
-
-        batch_size, _, _, _ = src.shape
-
-        query_embed = self.query_embed.weight
-        query_embed = query_embed.unsqueeze(1).repeat(1, batch_size, 1)
-        tgt = None
-        if targets is not None and 'track_query_hs_embeds' in targets[0]:
-            # [BATCH_SIZE, NUM_PROBS, 4]
-            track_query_hs_embeds = torch.stack([t['track_query_hs_embeds'] for t in targets])
-
-            num_track_queries = track_query_hs_embeds.shape[1]
-
-            track_query_embed = torch.zeros(
-                num_track_queries,
-                batch_size,
-                self.hidden_dim).to(query_embed.device)
-            query_embed = torch.cat([
-                track_query_embed,
-                query_embed], dim=0)
-
-            tgt = torch.zeros_like(query_embed)
-            tgt[:num_track_queries] = track_query_hs_embeds.transpose(0, 1)
-
-            for i, target in enumerate(targets):
-                target['track_query_hs_embeds'] = tgt[:, i]
-
-        assert mask is not None
-        # hs, hs_without_norm, memory = self.transformer(
-        #     src, mask, query_embed, pos, tgt)
-        src_flatten, mask_flatten, pos_flatten = self.flatten_list(src_list), self.flatten_list(
-            src_list), self.flatten_list(src_list)
-
-        hs, hs_without_norm, memory, enc_outputs_class, enc_outputs_coord_unact = \
-            self.transformer(src_list, mask_list, pos_list, query_embed, targets)
-
-        outputs_class = self.class_embed(hs)
-        outputs_coord = self.bbox_embed(hs).sigmoid()
-        out = {'pred_logits': outputs_class[-1],
-               'pred_boxes': outputs_coord[-1],
-               'hs_embed': hs_without_norm[-1]}
-
-        if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(
-                outputs_class, outputs_coord)
-
-        return out, targets, features_all, memory, hs
-
 
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
@@ -788,7 +626,6 @@ class PostProcess(nn.Module):
         scores, labels = prob[..., :-1].max(-1)
 
         boxes = self.process_boxes(out_bbox, target_sizes)
-
 
         results = [
             {'scores': s, 'labels': l, 'boxes': b, 'scores_no_object': s_n_o}

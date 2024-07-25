@@ -67,6 +67,8 @@ def add_noise_tracklets(tracklets, width, height, noise_range=[20, 30]):
     new_tracklets[:, :, 1::2] += noise_values_height
     new_tracklets[:, :, 0::2] = torch.clamp_(new_tracklets[:, :, 0::2], 0, width)
     new_tracklets[:, :, 1::2] = torch.clamp_(new_tracklets[:, :, 1::2], 0, height)
+    new_tracklets[:, :, 2] = torch.clamp_(new_tracklets[:, :, 2], new_tracklets[:, :, 0] + 5, width)
+    new_tracklets[:, :, 3] = torch.clamp_(new_tracklets[:, :, 3], new_tracklets[:, :, 1] + 5, height)
     # new_tracklets[:, :, :2] = torch.clamp_(new_tracklets[:, :, :2], 0)
     return new_tracklets
 
@@ -85,10 +87,10 @@ class RandomNoiseTracklets:
 
 
 class NormalizeTarget:
-    def __init__(self):
-        pass
+    def __init__(self,overflow_boxes):
+        self.overflow_boxes = overflow_boxes
 
-    def __call__(self, detections, target=None):
+    def __call__(self, detections: torch.Tensor, target: dict):
         target = target.copy()
         h, w = target['orig_size'][:2]
 
@@ -102,19 +104,24 @@ class NormalizeTarget:
             tracklets = target["tracklets"]
             tracklets[:, :, :4] = box_xyxy_to_cxcywh(tracklets[:, :, :4])
             tracklets[:, :, :4] = tracklets[:, :, :4] / torch.tensor([w, h, w, h], dtype=torch.float32)[None]
+            if not self.overflow_boxes:
+                tracklets = torch.clamp_(tracklets, 0, 1)
             target["tracklets"] = tracklets
 
         return detections, target
 
 
 class NormalizeDetections:
-    def __init__(self):
-        pass
+    def __init__(self,overflow_boxes):
+        self.overflow_boxes = overflow_boxes
 
-    def __call__(self, detections, target=None):
+    def __call__(self, detections: torch.Tensor, target: dict = None):
         h, w = target['orig_size'][:2]
         detections[:, :4] = box_xyxy_to_cxcywh(detections[:, :4])
         detections[:, :4] = detections[:, :4] / torch.tensor([w, h, w, h], dtype=torch.float32)
+        if not self.overflow_boxes:
+            detections[:, :5] = torch.clamp_(detections[:, :5], 0, 1)
+        target['detections'] = detections
         return detections, target
 
 
@@ -135,7 +142,7 @@ class DetectionsEncoderSine:
             scale = 2 * math.pi
         self.scale = scale
 
-    def __call__(self, x, target):
+    def __call__(self, x: torch.Tensor, target: dict):
         n_samples = x.size()[0]
         detections = x[:, :4]
         detection_meta_data = x[:, 4:].reshape([n_samples, -1])
@@ -147,17 +154,29 @@ class DetectionsEncoderSine:
         encoding_detections = torch.cat([embed_coord, detection_meta_data], dim=1)
         return encoding_detections, target
 
+class IdentityDetectionEncoder:
+    """
+    No encoding for detection locations (range between [0,1])
+    """
 
-def make_kine_transforms(image_set, prob_noise_pos=0.1, overflow_boxes=False, use_sin_encoding=True):
+    # def __init__(self, ):
+    #     pass
+
+    def __call__(self, x: torch.Tensor, target: dict):
+        return x, target
+
+
+def make_kine_transforms(image_set, prob_noise_pos=0.1, overflow_boxes=False, use_sin_encoding=True,dim_encoding=32):
     if use_sin_encoding:
         norm_transforms = T.Compose([
-            NormalizeTarget(),
-            DetectionsEncoderSine(),
+            NormalizeTarget(overflow_boxes),
+            NormalizeDetections(overflow_boxes),
+            DetectionsEncoderSine(dim_encoding),
         ])
     else:
         norm_transforms = T.Compose([
-            NormalizeTarget(),
-            NormalizeDetections(),
+            NormalizeTarget(overflow_boxes),
+            NormalizeDetections(overflow_boxes),
         ])
     # max_size = 1333
     # val_width = 800

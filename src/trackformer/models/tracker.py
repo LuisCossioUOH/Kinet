@@ -4,13 +4,15 @@ Tracker which achieves MOT with the provided object detector.
 """
 from collections import deque
 
-import numpy as np
 import torch
+import numpy as np
 import torch.nn.functional as F
+from ..util.box_ops import box_xyxy_to_cxcywh
 from scipy.optimize import linear_sum_assignment
 from torchvision.ops.boxes import clip_boxes_to_image, nms, box_iou
 
-from ..util.box_ops import box_xyxy_to_cxcywh
+from trackformer.models.detr_tracking import generate_pseudo_tracklets, SineEncodingTracklet, IdentityEncoding
+from trackformer.datasets.kinematic_utils import DetectionsEncoderSine
 
 
 class Tracker:
@@ -35,7 +37,8 @@ class Tracker:
         self.steps_termination = tracker_cfg['steps_termination']
 
         if self.generate_attention_maps:
-            assert hasattr(self.obj_detector.transformer.decoder.layers[-1], 'multihead_attn'), 'Generation of attention maps not possible for deformable DETR.'
+            assert hasattr(self.obj_detector.transformer.decoder.layers[-1],
+                           'multihead_attn'), 'Generation of attention maps not possible for deformable DETR.'
 
             attention_data = {
                 'maps': None,
@@ -49,7 +52,6 @@ class Tracker:
             def add_attention_map_to_data(self, input, output):
                 height, width = attention_data['conv_features']['3'].tensors.shape[-2:]
                 attention_maps = output[1].view(-1, height, width)
-
                 attention_data.update({'maps': attention_maps})
 
             multihead_attn = self.obj_detector.transformer.decoder.layers[-1].multihead_attn
@@ -83,12 +85,13 @@ class Tracker:
     def device(self):
         return next(self.obj_detector.parameters()).device
 
-    def tracks_to_inactive(self, tracks):
-        self.tracks = [t for t in self.tracks if t not in tracks]
+    def move_tracks_to_inactive(self, inactive_tracks):
+        self.tracks = [t for t in self.tracks if t not in inactive_tracks]
 
-        for track in tracks:
-            track.pos = track.last_pos[-1]
-        self.inactive_tracks += tracks
+        for track in inactive_tracks:
+            # track.pos = track.last_pos[-1]
+            track.repeat_last_pos()
+        self.inactive_tracks += inactive_tracks
 
     def add_tracks(self, pos, scores, hs_embeds, indices, masks=None, attention_maps=None, aux_results=None):
         """Initializes new Track objects and saves them."""
@@ -113,8 +116,8 @@ class Tracker:
 
             if aux_results is not None:
                 aux_scores = torch.cat([
-                    a['scores'][-self.num_object_queries:][indices]
-                    for a in aux_results] + [scores[..., None], ], dim=-1)
+                                           a['scores'][-self.num_object_queries:][indices]
+                                           for a in aux_results] + [scores[..., None], ], dim=-1)
 
                 for new_track_id, aux_score in zip(new_track_ids, aux_scores):
                     self._logger(f"AUX SCORES ID {new_track_id}: {[f'{s:.2f}' for s in aux_score]}")
@@ -138,8 +141,8 @@ class Tracker:
                          for box in new_det_boxes]
             item_size = np.array(item_size, np.float32)
 
-            new_det_boxes_cxcy = box_xyxy_to_cxcywh(new_det_boxes).cpu().numpy()[:,:2]
-            public_det_boxes_cxcy = box_xyxy_to_cxcywh(public_det_boxes).cpu().numpy()[:,:2]
+            new_det_boxes_cxcy = box_xyxy_to_cxcywh(new_det_boxes).cpu().numpy()[:, :2]
+            public_det_boxes_cxcy = box_xyxy_to_cxcywh(public_det_boxes).cpu().numpy()[:, :2]
 
             dist3 = new_det_boxes_cxcy.reshape(-1, 1, 2) - public_det_boxes_cxcy.reshape(1, -1, 2)
             dist3 = (dist3 ** 2).sum(axis=2)
@@ -184,7 +187,7 @@ class Tracker:
                 track.pos for track in self.inactive_tracks])).cpu().numpy()
 
             dist_mat = inactive_boxes_cxcyhw[:, :2].reshape(-1, 1, 2) - \
-                new_det_boxes_cxcyhw[:, :2].reshape(1, -1, 2)
+                       new_det_boxes_cxcyhw[:, :2].reshape(1, -1, 2)
             dist_mat = (dist_mat ** 2).sum(axis=2)
 
             track_size = inactive_boxes_cxcyhw[:, 2] * inactive_boxes_cxcyhw[:, 3]
@@ -390,7 +393,7 @@ class Tracker:
                 self.inactive_tracks.remove(track)
                 self.tracks.append(track)
 
-            self.tracks_to_inactive(tracks_to_inactive)
+            self.move_tracks_to_inactive(tracks_to_inactive)
             # self.tracks = [
             #         track for track in self.tracks
             #         if track not in tracks_to_inactive]
@@ -532,7 +535,8 @@ class Tracker:
             if self.obj_detector.overflow_boxes:
                 self.results[track.id][self.frame_index]['bbox'] = track.pos.cpu().numpy()
             else:
-                self.results[track.id][self.frame_index]['bbox'] = clip_boxes_to_image(track.pos, orig_size[0]).cpu().numpy()
+                self.results[track.id][self.frame_index]['bbox'] = clip_boxes_to_image(track.pos,
+                                                                                       orig_size[0]).cpu().numpy()
 
             self.results[track.id][self.frame_index]['score'] = track.score.cpu().numpy()
             self.results[track.id][self.frame_index]['obj_ind'] = track.obj_ind.cpu().item()
@@ -550,27 +554,442 @@ class Tracker:
         self._prev_features.append(features)
 
         if self.reid_sim_only:
-            self.tracks_to_inactive(self.tracks)
+            self.move_tracks_to_inactive(self.tracks)
 
     def get_results(self):
         """Return current tracking results."""
         return self.results
 
 
+class Tracker_Kinet(Tracker):
+
+    def __init__(self, obj_detector, obj_detector_post, tracker_cfg, obj_detector_args,
+                 generate_attention_maps, logger=None, verbose=False):
+        self.obj_detector = obj_detector
+        self.obj_detector_post = obj_detector_post
+        self.detection_obj_score_thresh = tracker_cfg['detection_obj_score_thresh']
+        self.track_obj_score_thresh = tracker_cfg['track_obj_score_thresh']
+        self.detection_nms_thresh = tracker_cfg['detection_nms_thresh']
+        self.track_nms_thresh = tracker_cfg['track_nms_thresh']
+        self.public_detections = tracker_cfg['public_detections']
+        self.inactive_patience = float(tracker_cfg['inactive_patience'])
+        self.reid_sim_threshold = tracker_cfg['reid_sim_threshold']
+        self.reid_sim_only = tracker_cfg['reid_sim_only']
+        # self.generate_attention_maps = generate_attention_maps
+        self.reid_score_thresh = tracker_cfg['reid_score_thresh']
+        self.reid_greedy_matching = tracker_cfg['reid_greedy_matching']
+        self.prev_frame_dist = tracker_cfg['prev_frame_dist']
+        self.steps_termination = tracker_cfg['steps_termination']
+
+        # kinet params
+        self.n_frames = obj_detector_args.track_prev_frame_range
+        self.use_sine_encoding = obj_detector_args.use_encoding_tracklets
+
+        if self.use_sine_encoding:
+            self.encoder_tracklets = SineEncodingTracklet(obj_detector_args.encoding_dim_tracklets)
+        else:
+            self.encoder_tracklets = IdentityEncoding()
+
+        # if self.generate_attention_maps:
+        #     assert hasattr(self.obj_detector.transformer.decoder.layers[-1], 'multihead_attn'), 'Generation of attention maps not possible for deformable DETR.'
+        #
+        #     attention_data = {
+        #         'maps': None,
+        #         'conv_features': {},
+        #         'hooks': []}
+        #
+        #     hook = self.obj_detector.backbone[-2].register_forward_hook(
+        #         lambda self, input, output: attention_data.update({'conv_features': output}))
+        #     attention_data['hooks'].append(hook)
+        #
+        #     def add_attention_map_to_data(self, input, output):
+        #         height, width = attention_data['conv_features']['3'].tensors.shape[-2:]
+        #         attention_maps = output[1].view(-1, height, width)
+        #         attention_data.update({'maps': attention_maps})
+        #
+        #     multihead_attn = self.obj_detector.transformer.decoder.layers[-1].multihead_attn
+        #     hook = multihead_attn.register_forward_hook(
+        #         add_attention_map_to_data)
+        #     attention_data['hooks'].append(hook)
+        #
+        #     self.attention_data = attention_data
+
+        self._logger = logger
+        if self._logger is None:
+            self._logger = lambda *log_strs: None
+        self._verbose = verbose
+
+    def step(self, blob):
+        """This function should be called every timestep to perform tracking with a blob
+        containing the image information.
+        """
+        self.inactive_tracks = [
+            t for t in self.inactive_tracks
+            if t.has_positive_area() and t.count_inactive <= self.inactive_patience
+        ]
+
+        self._logger(f'FRAME: {self.frame_index + 1}')
+        if self.inactive_tracks:
+            self._logger(f'INACTIVE TRACK IDS: {[t.id for t in self.inactive_tracks]}')
+
+        # add current position to last_pos list
+        # for track in self.tracks:
+        # track.last_pos.append(track.pos.clone())
+        # track.repeat_last_pos()
+
+        # img = blob['img'].to(self.device)
+        detections = blob['dets'].to(self.device)
+        orig_size = blob['orig_size'].to(self.device)
+
+        target = None
+        num_prev_track = len(self.tracks + self.inactive_tracks)
+        if num_prev_track:
+            track_query_boxes = torch.stack([
+                t.pos for t in self.tracks + self.inactive_tracks], dim=0).cpu()
+
+            track_query_boxes = box_xyxy_to_cxcywh(track_query_boxes)
+            track_query_boxes = track_query_boxes / torch.tensor([
+                orig_size[0, 1], orig_size[0, 0],
+                orig_size[0, 1], orig_size[0, 0]], dtype=torch.float32)
+
+            target = {'track_query_boxes': track_query_boxes}
+
+            target['image_id'] = torch.tensor([1]).to(self.device)
+
+            target['track_query_hs_embeds'] = torch.stack([t.hs_embed[-1] for t in self.tracks + self.inactive_tracks],
+                                                          dim=0)
+            target = {k: v.to(self.device) for k, v in target.items()}
+            target = [target]
+
+        outputs, _, features, _, _ = self.obj_detector(detections, target)
+        # Output
+        # pred_logits: tensor batch_size x num_queries x num_class
+        # pred_boxes: tensor batch_size x num_queries x 4
+        # hs_embed: tensor batch_size x num_queries x hidden_dim
+        # tracklet_embeds = outputs['hs_embed'][0]
+        tracklets = generate_pseudo_tracklets(outputs['pred_boxes'][0, :, :4], self.n_frames)
+        tracklet_embeds = self.encoder_tracklets(tracklets)
+        results = self.obj_detector_post['bbox'](outputs, orig_size)
+        # if "segm" in self.obj_detector_post:
+        #     results = self.obj_detector_post['segm'](
+        #         results,
+        #         outputs,
+        #         orig_size,
+        #         blob["size"].to(self.device),
+        #         return_probs=True)
+        result = results[0]
+
+        # if 'masks' in result:
+        #     result['masks'] = result['masks'].squeeze(dim=1)
+
+        if self.obj_detector.overflow_boxes:
+            boxes = result['boxes']
+            relative_boxes = outputs['pred_boxes'][0, :, :4]
+        else:
+            boxes = clip_boxes_to_image(result['boxes'], orig_size[0])
+            relative_boxes = (outputs['pred_boxes'][0, :, :4]).clamp(min=0.0, max=1.0)
+
+        # TRACKS
+        if num_prev_track:
+            track_scores = result['scores'][:-self.num_object_queries]
+            track_boxes = boxes[:-self.num_object_queries]
+            track_relative_boxes = outputs['pred_boxes'][0, :-self.num_object_queries, :4]
+
+            # if 'masks' in result:
+            #     track_masks = result['masks'][:-self.num_object_queries]
+            # if self.generate_attention_maps:
+            #     track_attention_maps = self.attention_data['maps'][:-self.num_object_queries]
+
+            track_keep = torch.logical_and(
+                track_scores > self.track_obj_score_thresh,
+                result['labels'][:-self.num_object_queries] == 0)
+
+            tracks_to_inactive = []
+            tracks_from_inactive = []
+
+            self.manage_active_tracks(track_boxes, track_relative_boxes, track_keep, track_scores, tracks_to_inactive)
+
+            track_keep = torch.logical_and(
+                track_scores > self.reid_score_thresh,
+                result['labels'][:-self.num_object_queries] == 0)
+
+            # reid queries
+            self.manage_inactive_tracks(track_boxes, track_relative_boxes, track_keep, track_scores,
+                                        tracks_from_inactive)
+
+            if tracks_to_inactive:
+                self._logger(
+                    f'NEW INACTIVE TRACK IDS '
+                    f'(track_obj_score_thresh={self.track_obj_score_thresh}): '
+                    f'{[t.id for t in tracks_to_inactive]}')
+
+            self.num_reids += len(tracks_from_inactive)
+            for track in tracks_from_inactive:
+                self.inactive_tracks.remove(track)
+                self.tracks.append(track)
+
+            self.move_tracks_to_inactive(tracks_to_inactive)
+            # self.tracks = [
+            #         track for track in self.tracks
+            #         if track not in tracks_to_inactive]
+
+            if self.track_nms_thresh and self.tracks:
+                track_boxes = torch.stack([t.pos for t in self.tracks])
+                track_scores = torch.stack([t.score for t in self.tracks])
+
+                keep = nms(track_boxes, track_scores, self.track_nms_thresh)
+                remove_tracks = [
+                    track for i, track in enumerate(self.tracks)
+                    if i not in keep]
+
+                if remove_tracks:
+                    self._logger(
+                        f'REMOVE TRACK IDS (track_nms_thresh={self.track_nms_thresh}): '
+                        f'{[track.id for track in remove_tracks]}')
+
+                # self.tracks_to_inactive(remove_tracks)
+                self.tracks = [
+                    track for track in self.tracks
+                    if track not in remove_tracks]
+
+        # NEW DETS
+        new_det_boxes, new_det_boxes_relative, new_tracklet_embeds, new_det_indices, \
+        new_det_scores = self.generate_new_tracks(blob, boxes, relative_boxes, tracklet_embeds, result)
+        # if 'masks' in result:
+        #     new_det_masks = new_det_masks[public_detections_mask]
+        # if self.generate_attention_maps:
+        #     new_det_attention_maps = new_det_attention_maps[public_detections_mask]
+
+        # reid
+        reid_mask = self.reid(
+            new_det_boxes,
+            new_det_scores,
+            new_tracklet_embeds,
+            # new_det_masks if 'masks' in result else None,
+            # new_det_attention_maps if self.generate_attention_maps else None
+        )
+
+        new_det_boxes = new_det_boxes[reid_mask]
+        new_det_boxes_relative = new_det_boxes_relative[reid_mask]
+        new_det_scores = new_det_scores[reid_mask]
+        new_tracklet_embeds = new_tracklet_embeds[reid_mask]
+        new_det_indices = new_det_indices[reid_mask]
+        # if 'masks' in result:
+        #     new_det_masks = new_det_masks[reid_mask]
+        # if self.generate_attention_maps:
+        #     new_det_attention_maps = new_det_attention_maps[reid_mask]
+
+        # final add track
+        aux_results = None
+        if self._verbose:
+            aux_results = [
+                self.obj_detector_post['bbox'](out, orig_size)[0]
+                for out in outputs['aux_outputs']]
+
+        new_track_ids = self.add_tracks(
+            new_det_boxes,
+            new_det_boxes_relative,
+            new_det_scores,
+            new_tracklet_embeds,
+            new_det_indices,
+            None,
+            None,
+            # new_det_masks if 'masks' in result else None,
+            # new_det_attention_maps if self.generate_attention_maps else None,
+            aux_results)
+
+        # NMS
+        if self.detection_nms_thresh and self.tracks:
+            track_boxes = torch.stack([t.pos for t in self.tracks])
+            track_scores = torch.stack([t.score for t in self.tracks])
+
+            new_track_mask = torch.tensor([
+                True if t.id in new_track_ids
+                else False
+                for t in self.tracks])
+            track_scores[~new_track_mask] = np.inf
+
+            keep = nms(track_boxes, track_scores, self.detection_nms_thresh)
+            remove_tracks = [track for i, track in enumerate(self.tracks) if i not in keep]
+
+            if remove_tracks:
+                self._logger(
+                    f'REMOVE TRACK IDS (detection_nms_thresh={self.detection_nms_thresh}): '
+                    f'{[track.id for track in remove_tracks]}')
+
+            self.tracks = [track for track in self.tracks if track not in remove_tracks]
+
+        ####################
+        # Generate Results #
+        ####################
+
+        # if 'masks' in result and self.tracks:
+        #     track_mask_probs = torch.stack([track.mask for track in self.tracks])
+        #     index_map = torch.arange(track_mask_probs.size(0))[:, None, None]
+        #     index_map = index_map.expand_as(track_mask_probs)
+        #
+        #     track_masks = torch.logical_and(
+        #         # remove background
+        #         track_mask_probs > 0.5,
+        #         # remove overlapp by largest probablity
+        #         index_map == track_mask_probs.argmax(dim=0)
+        #     )
+        #     for i, track in enumerate(self.tracks):
+        #         track.mask = track_masks[i]
+
+        for track in self.tracks:
+            if track.id not in self.results:
+                self.results[track.id] = {}
+
+            self.results[track.id][self.frame_index] = {}
+
+            if self.obj_detector.overflow_boxes:
+                self.results[track.id][self.frame_index]['bbox'] = track.pos.cpu().numpy()
+            else:
+                self.results[track.id][self.frame_index]['bbox'] = clip_boxes_to_image(track.pos,
+                                                                                       orig_size[0]).cpu().numpy()
+
+            self.results[track.id][self.frame_index]['score'] = track.score.cpu().numpy()
+            self.results[track.id][self.frame_index]['obj_ind'] = track.obj_ind.cpu().item()
+
+            # if track.mask is not None:
+            #     self.results[track.id][self.frame_index]['mask'] = track.mask.cpu().numpy()
+            # if track.attention_map is not None:
+            #     self.results[track.id][self.frame_index]['attention_map'] = \
+            #         track.attention_map.cpu().numpy()
+
+        for t in self.inactive_tracks:
+            t.count_inactive += 1
+
+        self.frame_index += 1
+        self._prev_features.append(features)
+
+        if self.reid_sim_only:
+            self.move_tracks_to_inactive(self.tracks)
+
+    def add_tracks(self, pos, pos_relatives, scores, hs_embeds, indices, masks=None, attention_maps=None,
+                   aux_results=None):
+        """Initializes new Track objects and saves them."""
+        new_track_ids = []
+        for i in range(len(pos)):
+            self.tracks.append(Track(
+                pos[i],
+                scores[i],
+                self.track_num + i,
+                hs_embeds[i],
+                indices[i],
+                pos_rel=pos_relatives[i],
+                mask=None if masks is None else masks[i],
+                attention_map=None if attention_maps is None else attention_maps[i],
+            ))
+            new_track_ids.append(self.track_num + i)
+        self.track_num += len(new_track_ids)
+
+        if new_track_ids:
+            self._logger(
+                f'INIT TRACK IDS (detection_obj_score_thresh={self.detection_obj_score_thresh}): '
+                f'{new_track_ids}')
+
+            if aux_results is not None:
+                aux_scores = torch.cat([
+                                           a['scores'][-self.num_object_queries:][indices]
+                                           for a in aux_results] + [scores[..., None], ], dim=-1)
+
+                for new_track_id, aux_score in zip(new_track_ids, aux_scores):
+                    self._logger(f"AUX SCORES ID {new_track_id}: {[f'{s:.2f}' for s in aux_score]}")
+
+        return new_track_ids
+
+    def generate_new_tracks(self, blob, boxes, relative_boxes, tracklet_embeds, result):
+        new_det_scores = result['scores'][-self.num_object_queries:]
+        new_det_boxes = boxes[-self.num_object_queries:]
+        new_relative_boxes = relative_boxes[-self.num_object_queries:]
+        new_tracklet_embeds = tracklet_embeds[-self.num_object_queries:]
+
+        # if 'masks' in result:
+        #     new_det_masks = result['masks'][-self.num_object_queries:]
+        # if self.generate_attention_maps:
+        #     new_det_attention_maps = self.attention_data['maps'][-self.num_object_queries:]
+        new_det_keep = torch.logical_and(
+            new_det_scores > self.detection_obj_score_thresh,
+            result['labels'][-self.num_object_queries:] == 0)
+
+        # new_det_keep[0] = True  # DELETE
+        new_det_boxes = new_det_boxes[new_det_keep]
+        new_det_scores = new_det_scores[new_det_keep]
+        new_tracklet_embeds = new_tracklet_embeds[new_det_keep]
+        new_relative_boxes = new_relative_boxes[new_det_keep]
+        new_det_indices = new_det_keep.float().nonzero()
+        # if 'masks' in result:
+        #     new_det_masks = new_det_masks[new_det_keep]
+        # if self.generate_attention_maps:
+        #     new_det_attention_maps = new_det_attention_maps[new_det_keep]
+        # public detection
+        public_detections_mask = self.public_detections_mask(
+            new_det_boxes, blob['dets'][0])
+        new_det_boxes = new_det_boxes[public_detections_mask]
+        new_relative_boxes = new_relative_boxes[public_detections_mask]
+        new_det_scores = new_det_scores[public_detections_mask]
+        new_tracklet_embeds = new_tracklet_embeds[public_detections_mask]
+        new_det_indices = new_det_indices[public_detections_mask]
+        return new_det_boxes, new_relative_boxes, new_tracklet_embeds, new_det_indices, new_det_scores
+
+    def manage_inactive_tracks(self, track_boxes, relative_boxes, track_keep, track_scores, tracks_from_inactive):
+        for i, track in enumerate(self.inactive_tracks, start=len(self.tracks)):
+            if track_keep[i]:
+                # track.score = track_scores[i]
+                # track.update_state(track_boxes[i], relative_boxes[i])
+                # track.hs_embed.append(self.encoder_tracklets(track.get_tracklets(self.n_frames)))
+                track.update_state(track_boxes[i], relative_boxes[i], track_scores[i],
+                                   self.encoder_tracklets(track.get_tracklets(self.n_frames)[None])[0])
+                # if 'masks' in result:
+                #     track.mask = track_masks[i]
+                # if self.generate_attention_maps:
+                #     track.attention_map = track_attention_maps[i]
+                tracks_from_inactive.append(track)
+
+    def manage_active_tracks(self, track_boxes, relative_boxes, track_keep, track_scores, tracks_to_inactive):
+        for i, track in enumerate(self.tracks):
+            if track_keep[i]:
+                # track.score =
+                track.update_state(track_boxes[i], relative_boxes[i], track_scores[i],
+                                   self.encoder_tracklets(track.get_tracklets(self.n_frames)[None])[0])
+                # hs_embed_track = self.encoder_tracklets(track.get_tracklets(self.n_frames, size_img))
+                # hs_embeds[i] = hs_embed_track
+                # track.hs_embed.append(hs_embeds[i])
+                # track.hs_embed.append()
+
+                track.count_termination = 0
+
+                # if 'masks' in result:
+                #     track.mask = track_masks[i]
+                # if self.generate_attention_maps:
+                #     track.attention_map = track_attention_maps[i]
+            else:
+                track.count_termination += 1
+                if track.count_termination >= self.steps_termination:
+                    tracks_to_inactive.append(track)
+
+
 class Track(object):
     """This class contains all necessary for every individual track."""
 
-    def __init__(self, pos, score, track_id, hs_embed, obj_ind,
+    def __init__(self, pos, score, track_id, hs_embed, obj_ind, pos_rel=None,
                  mask=None, attention_map=None):
         self.id = track_id
         self.pos = pos
+
         self.last_pos = deque([pos.clone()])
+        if pos_rel is None:
+            self.last_pos_relative = deque([-1])
+        else:
+            self.last_pos_relative = deque([pos_rel.clone()])
         self.score = score
         self.ims = deque([])
         self.count_inactive = 0
         self.count_termination = 0
         self.gt_id = None
-        self.hs_embed = [hs_embed] # Hidden state embedding (HS)
+        self.hs_embed = [hs_embed]  # Hidden state embedding (HS)
         self.mask = mask
         self.attention_map = attention_map
         self.obj_ind = obj_ind
@@ -580,7 +999,44 @@ class Track(object):
            a valid, .i.e., positive area, bounding box."""
         return self.pos[2] > self.pos[0] and self.pos[3] > self.pos[1]
 
+    def update_state(self, pos: torch.Tensor, relative_pos: torch.Tensor, track_scores: torch.Tensor,
+                     track_embed: torch.Tensor):
+        """
+        Method to update the overall state of the track.
+        """
+        self.last_pos.append(pos.clone())
+        self.pos = pos
+        self.last_pos_relative.append(relative_pos.clone())
+        self.score = track_scores
+        self.hs_embed += [track_embed]
+
+    def repeat_last_pos(self):
+        """
+        Method to update positions on track registry.
+        """
+        self.last_pos.append(self.last_pos[-1])
+        self.last_pos_relative.append(self.last_pos_relative[-1])
+
+    def get_tracklets(self, n_frames: int):
+        """
+        Method to update the overall state of the track.
+        """
+        n_frames_present = min(n_frames, len(self.last_pos))
+        tracklets = []
+        # h, w = size_image[:2]
+        # size_normalizer = torch.tensor([w, h, w, h], dtype=torch.float32)
+        dif_frames = n_frames - n_frames_present
+        for i in range(dif_frames):
+            # tracklets += [self.last_pos[0].clone / size_normalizer]
+            tracklets += [self.last_pos_relative[0].clone()]
+
+        for i in range(n_frames_present):
+            tracklets += [self.last_pos_relative[-(n_frames_present - i)].clone()]
+
+        return torch.stack(tracklets)
+
     def reset_last_pos(self) -> None:
         """Reset last_pos to the current position of the track."""
         self.last_pos.clear()
+        self.last_pos_relative.clear()
         self.last_pos.append(self.pos.clone())

@@ -110,13 +110,11 @@ class Backbone(BackboneBase):
 
 class layer_backbone(nn.Module):
     def __init__(self, input_dim, hidden_dim, activation='relu', dropout=0.1):
-
         super(layer_backbone, self).__init__()
         self.activation = _get_activation_fn(activation)
         self.linear = nn.Linear(input_dim, hidden_dim)
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(hidden_dim)
-
 
     def forward(self, x):
         x = self.dropout(self.activation(self.linear(x)))
@@ -124,7 +122,7 @@ class layer_backbone(nn.Module):
         return x
 
 
-class Kine_Backbone(nn.Module):
+class Kinet_Backbone(nn.Module):
     def __init__(self, input_dim, hidden_dims, activation='relu', return_interm_layers=False):
         super().__init__()
         current_dim = input_dim
@@ -139,29 +137,36 @@ class Kine_Backbone(nn.Module):
         self.layers = nn.ModuleList(
             [layer_backbone(initial_dim[i], hidden_dims[i], activation) for i in range(len(hidden_dims))])
 
-    def forward(self, x):
+    def forward(self, tensor_list):
 
+        x = tensor_list.tensors
+        mask = tensor_list.mask
         if self.return_interm_layers:
             results_itnermediate = []
+        out = []
+
         for i, l in enumerate(self.layers):
             x = l(x)
+            # mask = F.interpolate(mask.float(), size=x.shape[-1:]).to(torch.bool)
+            out += [NestedTensor(x, mask)]
             if self.return_interm_layers:
                 results_itnermediate += [x]
 
         if self.return_interm_layers:
-            return x, results_itnermediate
+            return out, results_itnermediate
 
-        return x
+        return out[-1]
 
-class Joiner_kine(nn.Sequential):
-    def __init__(self,backbone, position_embedding):
-        super().__init__(position_embedding, backbone)
-        self.num_channels = backbone.num_channels
 
-    def forward(self, tensor_list: NestedTensor):
-        embedding_pos = self[0](tensor_list)
-        out = self[1](embedding_pos).to(embedding_pos.tensors.dtype)
-        return out
+# class Joiner_kine(nn.Sequential):
+#     def __init__(self,backbone, position_embedding):
+#         super().__init__(position_embedding, backbone)
+#         self.num_channels = backbone.num_channels
+#
+#     def forward(self, tensor_list: NestedTensor):
+#         embedding_pos = self[0](tensor_list)
+#         out = self[1](embedding_pos).to(embedding_pos.tensors.dtype)
+#         return out
 
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
@@ -179,12 +184,20 @@ class Joiner(nn.Sequential):
             pos.append(self[1](x).to(x.tensors.dtype))
         return out, pos
 
-def build_backbone(args):
 
+def build_backbone(args):
     return_interm_layers = args.masks or (args.num_feature_levels > 1)
-    if args.kine:
-        backbone = Kine_Backbone(args.hidden_dim, hidden_dims=[288, 512], activation=args.activation,
-                                 return_interm_layers=return_interm_layers)
+    if args.kinet:
+        if args.use_encoding_tracklets:
+            args.input_dim = args.encoding_dim_detections * 4
+        else:
+            args.input_dim = 4
+        if args.use_class:
+            args.input_dim += 2  # confidence + class
+        else:
+            args.input_dim += 1  # confidence
+        backbone = Kinet_Backbone(args.input_dim, hidden_dims=[32, 64, args.hidden_dim], activation=args.activation,
+                                  return_interm_layers=return_interm_layers)
         return backbone
     else:
         position_embedding = build_position_encoding(args)
