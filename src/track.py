@@ -20,15 +20,15 @@ from trackformer.datasets.kinematic_utils import DetectionsEncoderSine, Identity
 from trackformer.util.track_utils import (evaluate_mot_accums, get_mot_accum,
                                           interpolate_tracks, plot_sequence)
 
-mm.lap.default_solver = 'lap'
+# mm.lap.default_solver = 'lap'
+#
+# ex = sacred.Experiment('track')
+# ex.add_config('cfgs/track.yaml')
+# ex.add_named_config('reid', 'cfgs/track_reid.yaml')
+# ex.add_named_config('kinet_track', 'cfgs/track_kinet.yaml')
+#
 
-ex = sacred.Experiment('track')
-ex.add_config('cfgs/track.yaml')
-ex.add_named_config('reid', 'cfgs/track_reid.yaml')
-ex.add_named_config('kinet', 'cfgs/track_kinet.yaml')
-
-
-@ex.automain
+# @ex.automain
 def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
          write_images, output_dir, interpolate, verbose, load_results_dir,
          data_root_dir, generate_attention_maps, frame_range,
@@ -101,7 +101,7 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
     track_logger = None
     if verbose:
         track_logger = _log.info
-    if obj_detect_args.kinet:
+    if obj_detect_args.kine:
         tracker = Tracker_Kinet(
             obj_detector, obj_detector_post, tracker_cfg,obj_detect_args,
             generate_attention_maps, track_logger, verbose)
@@ -113,8 +113,8 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
     time_total = 0
     num_frames = 0
     mot_accums = []
-    if obj_detect_args.kinet:
-        if obj_detect_args.encoding_dim_detections:
+    if obj_detect_args.kine:
+        if obj_detect_args.use_encoding_dets:
             detection_encoder = DetectionsEncoderSine(obj_detect_args.encoding_dim_detections)
         else:
             detection_encoder = IdentityDetectionEncoder()
@@ -225,3 +225,7 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
         return summary
 
     return mot_accums
+
+
+if __name__=='__main__':
+    main()

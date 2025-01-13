@@ -73,7 +73,8 @@ def rand_cmap(nlabels, type='bright', first_color_black=True, last_color_black=F
 
     if verbose:
         print('Number of labels: ' + str(nlabels))
-
+    if nlabels == 0:
+        return LinearSegmentedColormap.from_list('new_map', [[0,0,0]], N=1)
     # Generate color map for bright colors, based on hsv
     if type == 'bright':
         randHSVcolors = [(np.random.uniform(low=0.0, high=1),

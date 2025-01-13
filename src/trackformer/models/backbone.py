@@ -108,16 +108,19 @@ class Backbone(BackboneBase):
             self.strides[-1] = self.strides[-1] // 2
 
 
-class layer_backbone(nn.Module):
+class LayerBackboneFC(nn.Module):
     def __init__(self, input_dim, hidden_dim, activation='relu', dropout=0.1):
-        super(layer_backbone, self).__init__()
+        super(LayerBackboneFC, self).__init__()
         self.activation = _get_activation_fn(activation)
-        self.linear = nn.Linear(input_dim, hidden_dim)
+        self.linear1 = nn.Linear(input_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear3 = nn.Linear(hidden_dim, hidden_dim)
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x):
-        x = self.dropout(self.activation(self.linear(x)))
+        x = self.activation(self.linear2(self.dropout(self.linear1(x))))
+        x = self.linear3(self.dropout(x))
         x = self.norm(x)
         return x
 
@@ -134,28 +137,34 @@ class Kinet_Backbone(nn.Module):
             initial_dim += [current_dim]
             current_dim = dim
 
+        # self.layers = nn.ModuleList(
+        #     [layer_backbone(initial_dim[i], hidden_dims[i], activation) for i in range(len(hidden_dims))])
         self.layers = nn.ModuleList(
-            [layer_backbone(initial_dim[i], hidden_dims[i], activation) for i in range(len(hidden_dims))])
+            [LayerBackboneFC(input_dim, hidden_dims[-1], activation)])
 
-    def forward(self, tensor_list):
+    def forward(self, tensor_list: NestedTensor):
 
         x = tensor_list.tensors
         mask = tensor_list.mask
         if self.return_interm_layers:
-            results_itnermediate = []
-        out = []
-
+            results_intermediate = []
+        out: Dict[str, NestedTensor] = {}
+        count = 0
         for i, l in enumerate(self.layers):
             x = l(x)
+
             # mask = F.interpolate(mask.float(), size=x.shape[-1:]).to(torch.bool)
-            out += [NestedTensor(x, mask)]
             if self.return_interm_layers:
-                results_itnermediate += [x]
+                results_intermediate += [x]
+                name = "{:d}".format(count)
+                out[name] = NestedTensor(x, mask)
+                count += 1
 
         if self.return_interm_layers:
-            return out, results_itnermediate
-
-        return out[-1]
+            return out
+        name = "{:d}".format(count)
+        out[name] = NestedTensor(x, mask)
+        return out
 
 
 # class Joiner_kine(nn.Sequential):
@@ -171,7 +180,7 @@ class Kinet_Backbone(nn.Module):
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
-        self.strides = backbone.strides
+        # self.strides = backbone.strides
         self.num_channels = backbone.num_channels
 
     def forward(self, tensor_list: NestedTensor):
@@ -187,18 +196,29 @@ class Joiner(nn.Sequential):
 
 def build_backbone(args):
     return_interm_layers = args.masks or (args.num_feature_levels > 1)
-    if args.kinet:
-        if args.use_encoding_tracklets:
-            args.input_dim = args.encoding_dim_detections * 4
+    if args.kine:
+        if args.use_encoding_dets:
+            args.input_dim_det = args.encoding_dim_detections * 4
         else:
-            args.input_dim = 4
+            args.input_dim_det = 4
         if args.use_class:
-            args.input_dim += 2  # confidence + class
+            args.input_dim_meta = 2  # confidence + class
         else:
-            args.input_dim += 1  # confidence
-        backbone = Kinet_Backbone(args.input_dim, hidden_dims=[32, 64, args.hidden_dim], activation=args.activation,
-                                  return_interm_layers=return_interm_layers)
-        return backbone
+            args.input_dim_meta = 1  # confidence
+
+        backbone_det = Kinet_Backbone(args.input_dim_det, hidden_dims=[256, 512, args.hidden_dim],
+                                      activation=args.activation, return_interm_layers=return_interm_layers)
+
+        backbone_metadata = Kinet_Backbone(args.input_dim_meta, hidden_dims=[16, 64, args.hidden_dim],
+                                      activation=args.activation,
+                                      return_interm_layers=return_interm_layers)
+
+        detection_embedding = build_position_encoding(args)
+
+        back1 = Joiner(backbone_det, detection_embedding)
+        back2 = Joiner(backbone_metadata, detection_embedding)
+
+        return [back1,  back2]
     else:
         position_embedding = build_position_encoding(args)
         train_backbone = args.lr_backbone > 0

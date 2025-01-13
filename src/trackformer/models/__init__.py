@@ -22,10 +22,9 @@ def build_model(args):
         # num_classes = 91
         num_classes = 20
         # num_classes = 1
-    elif args.dataset in ['mot_kine']:
-        # num_classes = 1
-        num_classes = 20
-        args.use_class = False
+    elif args.dataset == 'mot_kine':
+        num_classes = 1
+        # num_classes = 20
     else:
         raise NotImplementedError
 
@@ -70,20 +69,26 @@ def build_model(args):
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
                 model = DeformableDETR(**detr_kwargs)
-    elif args.kinet:
+    elif args.kine:
         # detr_kwargs['multi_frame_attention'] = args.multi_frame_attention
         # detr_kwargs['multi_frame_encoding'] = args.multi_frame_encoding
         # detr_kwargs['merge_frame_features'] = args.merge_frame_features
         transformer = build_transformer(args)
         detr_kwargs['transformer'] = transformer
         if args.use_encoding_tracklets:
-            detr_kwargs['dim_tracklets'] = 4 * args.encoding_dim_tracklets * args.track_prev_frame_range
+            detr_kwargs['dim_tracklets_det'] = 4 * args.encoding_dim_tracklets * args.track_prev_frame_range
         else:
-            detr_kwargs['dim_tracklets'] = 4 * args.track_prev_frame_range
+            detr_kwargs['dim_tracklets_det'] = 4 * args.track_prev_frame_range
+
+        if args.use_class:
+            detr_kwargs['dim_tracklets_metadata'] = 2
+        else:
+            detr_kwargs['dim_tracklets_metadata'] = 1
 
         tracking_kwargs['use_encoding'] = args.use_encoding_tracklets
         tracking_kwargs['frame_range'] = args.track_prev_frame_range
         tracking_kwargs['num_pos_feats'] = args.encoding_dim_tracklets
+        tracking_kwargs['ratio_add_tracklets'] = args.ratio_add_tracklets
         tracking_kwargs['matcher'] = BasicBoxHungarianMatcher(cost_class=args.set_cost_class,
                                                               cost_bbox=args.set_cost_bbox,
                                                               cost_giou=args.set_cost_giou,
@@ -117,7 +122,6 @@ def build_model(args):
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
 
-    # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
         for i in range(args.dec_layers - 1):

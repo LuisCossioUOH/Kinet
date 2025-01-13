@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ..util import box_ops
-from ..util.misc import (NestedTensor, accuracy, dice_loss, get_world_size,
+from ..util.misc import (NestedTensor, NestedTensorKinet, accuracy, dice_loss, get_world_size,
                          interpolate, is_dist_avail_and_initialized,
                          nested_tensor_from_tensor_list, sigmoid_focal_loss)
 
@@ -234,7 +234,7 @@ class KineT(nn.Module):
         query_embed = self.query_embed.weight
         query_embed = query_embed.unsqueeze(1).repeat(1, batch_size, 1)
         tgt = None
-        if targets is not None and (len(targets[0]['track_query_hs_embeds'])> 0):
+        if targets is not None and (len(targets[0]['track_query_hs_embeds']) > 0):
             track_query_hs_embeds = torch.stack([t['track_query_hs_embeds'] for t in targets])
 
             num_track_queries = track_query_hs_embeds.shape[1]
@@ -285,6 +285,152 @@ class KineT(nn.Module):
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
 
+class KinematicDetector(nn.Module):
+    def __init__(self, backbone: list, transformer, num_classes: int, num_queries: int, aux_loss=False,
+                 overflow_boxes=False,
+                 dim_tracklets_det=128, dim_tracklets_metadata=8,
+                 #  multi_frame_encoding=False,multi_frame_attention=False,
+                 # merge_frame_features=False
+                 ):
+        """ Initializes the model.
+        Parameters:
+            backbone: list of backbones modules. See backbone.py
+            transformer: torch module of the transformer architecture. See transformer.py
+            num_classes: number of object classes
+            num_queries: number of object queries, ie detection slot. This is the maximal
+                         number of objects DETR can detect in a single image.
+        """
+        super().__init__()
+
+        self.num_queries = num_queries
+        self.transformer = transformer
+        self.overflow_boxes = overflow_boxes
+        self.class_embed = nn.Linear(self.hidden_dim, num_classes + 1)
+        self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
+        self.query_embed_det = nn.Embedding(num_queries, self.hidden_dim)
+        self.query_embed_metadata = nn.Embedding(num_queries, self.hidden_dim)
+
+        # match interface with deformable DETR
+        # self.input_proj_tracklets_det = MLP(dim_tracklets_det, self.hidden_dim, self.hidden_dim, 3)
+        # self.input_proj_tracklets_metadata = MLP(dim_tracklets_metadata, self.hidden_dim // 2, self.hidden_dim, 3)
+        # self.input_proj = nn.Conv2d(backbone.num_channels[-1], self.hidden_dim, kernel_size=1)
+        # self.input_proj = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.Conv2d(backbone.num_channels[-1], self.hidden_dim, kernel_size=1)
+        #     )])
+
+        self.backbone_det = backbone[0]
+        self.backbone_metadata = backbone[1]
+        self.aux_loss = aux_loss
+
+
+    @property
+    def hidden_dim(self):
+        """ Returns the hidden feature dimension size. """
+        return self.transformer.d_model
+
+    @property
+    def fpn_channels(self):
+        """ Returns FPN channels. """
+        return self.backbone.num_channels[:3][::-1]
+        # return [1024, 512, 256]
+
+    def forward(self, samples: NestedTensorKinet, targets: list = None):
+        """ The forward expects a NestedTensor, which consists of:
+               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+               - samples.mask: a binary mask of shape [batch_size x H x W],
+                               containing 1 on padded pixels
+
+        It returns a dict with the following elements:
+               - "pred_logits": the classification logits (including no-object) for all queries.
+                                Shape= [batch_size x num_queries x (num_classes + 1)]
+               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                               (center_x, center_y, height, width). These values are normalized
+                               in [0, 1], relative to the size of each individual image
+                               (disregarding possible padding). See PostProcess for information
+                               on how to retrieve the unnormalized bounding box.
+               - "aux_outputs": Optional, only returned when auxilary losses are activated. It
+                                is a list of dictionnaries containing the two above keys for
+                                each decoder layer.
+        """
+
+        features_det, pos_det = self.backbone_det(samples.detections)
+        features_metadata, pos_metadata = self.backbone_metadata(samples.metadata)
+
+        src_det, mask = features_det[-1].decompose()
+        src_metadata, _ = features_metadata[-1].decompose()
+        # src = self.input_proj[-1](src)
+        # src = self.input_proj(features)
+        # pos = pos[-1]
+
+        batch_size = src_det.size()[0]
+
+
+        query_embed_det = self.query_embed_det.weight
+        query_embed_metadata = self.query_embed_metadata.weight
+        query_embed_det = query_embed_det.unsqueeze(1).repeat(1, batch_size, 1)
+        query_embed_metadata = query_embed_metadata.unsqueeze(1).repeat(1, batch_size, 1)
+        tgt_det = None
+        tgt_metadata = None
+        if targets is not None and (len(targets[0]['track_query_hs_embeds_det']) > 0):
+            track_query_hs_embeds_det = torch.stack([t['track_query_hs_embeds_det'] for t in targets])
+
+            num_track_queries = track_query_hs_embeds_det.shape[1]
+
+            track_query_embed_det = torch.zeros(
+                num_track_queries,
+                batch_size,
+                self.hidden_dim).to(query_embed_det.device)
+            query_embed_det = torch.cat([
+                track_query_embed_det,
+                query_embed_det], dim=0)
+
+            tgt_det = torch.zeros_like(query_embed_det)
+            tgt_det[:num_track_queries] = self.input_proj_tracklets_det(track_query_hs_embeds_det.transpose(0, 1))
+
+            track_query_hs_embeds_meta = torch.stack([t['track_query_hs_embeds_meta'] for t in targets])
+
+            track_query_embed_metadata = torch.zeros(
+                num_track_queries,
+                batch_size,
+                self.hidden_dim).to(query_embed_metadata.device)
+            query_embed_metadata = torch.cat([
+                track_query_embed_metadata,
+                query_embed_det], dim=0)
+
+            tgt_metadata = torch.zeros_like(query_embed_metadata)
+            tgt_metadata[:num_track_queries] = self.input_proj_tracklets_metadata(
+                track_query_hs_embeds_meta.transpose(0, 1))
+
+        # hs_det, hs_metadata, hs_without_norm_det, memory_det = self.transformer(
+        #     src_det, src_metadata, mask, query_embed_det, query_embed_metadata, tgt_det, tgt_metadata,
+        #     pos_boxes=pos_det[0], pos_metadata=pos_metadata[0])
+
+        hs_metadata = src_metadata[None] # DELETE
+        hs_det = src_det[None] # DELETE
+
+        outputs_class = self.class_embed(hs_metadata)
+        outputs_coord = self.bbox_embed(hs_det).sigmoid()
+        out = {'pred_logits': outputs_class[-1],
+               'pred_boxes': outputs_coord[-1],
+               # 'hs_embed': hs_without_norm_det[-1]  ###
+               }
+
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(
+                outputs_class, outputs_coord)
+
+        return out, targets, features_det, src_det, hs_det
+
+    @torch.jit.unused
+    def _set_aux_loss(self, outputs_class, outputs_coord):
+        # this is a workaround to make torchscript happy, as torchscript
+        # doesn't support dictionary with non-homogeneous values, such
+        # as a dict having both a Tensor and a list.
+        return [{'pred_logits': a, 'pred_boxes': b}
+                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+
+
 class SetCriterion(nn.Module):
     """ This class computes the loss for DETR.
     The process happens in two steps:
@@ -324,9 +470,14 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
+        src_logits = outputs['pred_logits']  # print(src_logits[1,indices[1][0][:4],0::20])
 
         idx = self._get_src_permutation_idx(indices)
+        # len_indices = [len(J) for I, J in indices]
+        # len_targets = [t['boxes'].size()[0] for t in targets]
+        # same = torch.tensor([i == t for i, t in zip(len_indices, len_targets)], dtype=torch.bool) # DELETE
+        # if not same.all():
+        #     print('found')
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                     dtype=torch.int64, device=src_logits.device)
@@ -526,6 +677,7 @@ class SetCriterion(nn.Module):
             'boxes': self.loss_boxes,
             'masks': self.loss_masks,
         }
+
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
@@ -537,11 +689,22 @@ class SetCriterion(nn.Module):
                       The expected keys in each dict depends on the losses applied,
                       see each loss' doc
         """
+
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
+        # ids = [t['image_id'] for t in targets]
+        # if 100 in ids:
+        #     index_check = (torch.tensor(ids) == 100).nonzero()
+        #     # print('ids: ', ids)
+        #     print('ids: ', ids[index_check])
         indices = self.matcher(outputs_without_aux, targets)
-
+         # DELETE
+        # if 100 in ids:
+        #     print('indices pred: ', indices[index_check])
+        #     if indices[index_check][0][0] > 5:
+        #         print("found: ",)
+        #         indices = self.matcher(outputs_without_aux, targets)
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor(

@@ -13,6 +13,7 @@ import yaml
 from torch.utils.data import DataLoader, DistributedSampler
 
 import trackformer.util.misc as utils
+
 from trackformer.datasets import build_dataset
 from trackformer.engine import evaluate, train_one_epoch
 from trackformer.models import build_model
@@ -35,7 +36,6 @@ ex.add_named_config('mot20_crowdhuman', 'cfgs/train_mot20_crowdhuman.yaml')
 ex.add_named_config('coco_person_masks', 'cfgs/train_coco_person_masks.yaml')
 ex.add_named_config('full_res', 'cfgs/train_full_res.yaml')
 ex.add_named_config('multi_frame', 'cfgs/train_multi_frame.yaml')
-
 
 def train(args: Namespace) -> None:
     print(args)
@@ -119,9 +119,12 @@ def train(args: Namespace) -> None:
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
 
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [args.lr_drop])
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                        [args.lr_drop * i for i in range(1, args.epochs//args.lr_drop)],
+                                                        gamma=args.lr_linear_proj_mult)
 
     dataset_train = build_dataset(split='train', args=args)
+
     dataset_val = build_dataset(split='val', args=args)
 
     if args.distributed:
@@ -134,18 +137,31 @@ def train(args: Namespace) -> None:
 
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
-
-    data_loader_train = DataLoader(
-        dataset_train,
-        batch_sampler=batch_sampler_train,
-        collate_fn=utils.collate_fn,
-        num_workers=args.num_workers)
-    data_loader_val = DataLoader(
-        dataset_val, args.batch_size,
-        sampler=sampler_val,
-        drop_last=False,
-        collate_fn=utils.collate_fn,
-        num_workers=args.num_workers)
+    if not args.kine:
+        data_loader_train = DataLoader(
+            dataset_train,
+            batch_sampler=batch_sampler_train,
+            collate_fn=utils.collate_fn,
+            num_workers=args.num_workers)
+        data_loader_val = DataLoader(
+            dataset_val, args.batch_size,
+            sampler=sampler_val,
+            drop_last=False,
+            collate_fn=utils.collate_fn,
+            num_workers=args.num_workers)
+    else:
+        collate_function_train, collate_function_val = utils.get_kinet_collate_function(args.use_empty_start)
+        data_loader_train = DataLoader(
+            dataset_train,
+            batch_sampler=batch_sampler_train,
+            collate_fn=collate_function_train,
+            num_workers=args.num_workers)
+        data_loader_val = DataLoader(
+            dataset_val, args.batch_size,
+            sampler=sampler_val,
+            drop_last=False,
+            collate_fn=collate_function_val,
+            num_workers=args.num_workers)
 
     best_val_stats = None
     if args.resume:
@@ -266,7 +282,8 @@ def train(args: Namespace) -> None:
                     visualizers[k][k_inner].win = checkpoint['vis_win_names'][k][k_inner]
 
     if args.eval_only:
-        _, coco_evaluator = evaluate(
+
+        _, coco_evaluator, stats_eval = evaluate(
             model, criterion, postprocessors, data_loader_val, device,
             output_dir, visualizers['val'], args, 0)
         if args.output_dir:
@@ -284,6 +301,7 @@ def train(args: Namespace) -> None:
             visualizers['train'], args)
 
         if args.eval_train:
+
             random_transforms = data_loader_train.dataset._transforms
             data_loader_train.dataset._transforms = data_loader_val.dataset._transforms
             evaluate(
@@ -312,8 +330,8 @@ def train(args: Namespace) -> None:
                 }, checkpoint_path)
 
         # VAL
-        if epoch == 1 or not epoch % args.val_interval:
-            val_stats, _ = evaluate(
+        if epoch % args.val_interval == 0:
+            val_stats, _,stats = evaluate(
                 model, criterion, postprocessors, data_loader_val, device,
                 output_dir, visualizers['val'], args, epoch)
 
@@ -337,7 +355,6 @@ def train(args: Namespace) -> None:
             for b_s, s, n in zip(best_val_stats, val_stats, stat_names):
                 if b_s == s:
                     checkpoint_paths.append(output_dir / f"checkpoint_best_{n}.pth")
-
 
 
     total_time = time.time() - start_time

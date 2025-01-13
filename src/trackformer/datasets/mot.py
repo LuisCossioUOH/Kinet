@@ -20,7 +20,7 @@ from .crowdhuman import build_crowdhuman
 from .coco import CocoDetection, make_coco_transforms
 from .kinematic_utils import make_kine_transforms, ConvertCocoAnnsToTrack, DetectionsEncoderSine, NormalizeDetections
 
-import trackformer.datasets.transforms as T
+# import trackformer.datasets.transforms as T
 
 
 
@@ -151,9 +151,14 @@ class MOT_Kine(CocoDetection):
         self._prev_prev_frame = prev_frame_range > 1
         self.path_detections = path_detections
         self.sequence_ids = {seq: [] for seq in self.sequences}
+        self.sequence_dims = []
         for id_img in self.ids:
             image = self.coco.dataset['images'][id_img]
-            self.sequence_ids[image['file_name'].split('_')[0]] += [image['id']]
+            seq_name = image['file_name'].split('_')[0]
+            self.sequence_ids[seq_name] += [image['id']]
+            self.sequence_dims += [(self.coco.dataset['images'][id_img]['width'],
+                                    self.coco.dataset['images'][id_img]['height'])]
+
         self.sequences_length = {seq: self.coco.dataset['images'][self.sequence_ids[seq][0]]['seq_length'] for seq in
                                  self.sequences}
         self.sequences_frame_ids = []
@@ -212,6 +217,15 @@ class MOT_Kine(CocoDetection):
         return self._get_samples_from_annotations(self.coco, idx)
 
     def get_id_prev_frames(self, idx:int):
+        """
+        Get valid previous frames from index idx. Valid previous frames must be contained in the same video. If a video
+        starts at frame 2000, the previous valid frames for idx=2001 will be [2000,2000,2000,2000,2000]
+        @param idx: index of current frame
+        @return: Reuturn array of increasing values that include the previous frames:
+                    Ex: idx = 2112
+                    return = np.array([2107 2108 2109 2110 2111])
+
+        """
         if not (idx in self.ids):
             if idx < 0:
                 return self.get_id_prev_frames(self.ids[-1])
@@ -238,9 +252,12 @@ class MOT_Kine(CocoDetection):
         #     'torch': torch.random.get_rng_state()}
         #
         # img, target = self._getitem_from_id(idx,random_state)
-        img = self._load_image(idx)
+        # if idx == 147: # DELETE
+        #     print('found')
+        # img = self._load_image(idx)
         target = self._load_target(idx)
         detections = self._load_detection(idx)
+        dims = self.sequence_dims[idx]
 
         image_id = self.ids[idx]
         target = {'image_id': image_id,
@@ -252,13 +269,194 @@ class MOT_Kine(CocoDetection):
         for i in idx_data:
             prev_targets += [self._load_target(i)]
 
-        detections, target = self.prepare(img, detections, target, prev_targets)
+        detections, target = self.prepare(dims, detections, target, prev_targets)
 
         if self._transforms is not None:
             detections, target = self._transforms(detections, target)
 
         detections, target = self._norm_transforms(detections, target)
         return detections, target
+
+    def write_result_files(self, results, output_dir, threshold=0.7):
+        """Write the detections in the format for the MOT17Det sumbission
+
+        Each file contains these lines:
+        <frame>, <id>, <bb_left>, <bb_top>, <bb_width>, <bb_height>, <conf>, <x>, <y>, <z>
+
+        """
+
+        files = {}
+        for image_id, res in results.items():
+            img = self.coco.loadImgs(image_id)[0]
+            file_name_without_ext = os.path.splitext(img['file_name'])[0]
+            seq_name, frame = file_name_without_ext.split('_')
+            frame = int(frame)
+
+            outfile = os.path.join(output_dir, f"{seq_name}.txt")
+
+            # check if out in keys and create empty list if not
+            if outfile not in files.keys():
+                files[outfile] = []
+
+            for box, score in zip(res['boxes'], res['scores']):
+                if score <= threshold:
+                    continue
+                x1 = box[0].item()
+                y1 = box[1].item()
+                x2 = box[2].item()
+                y2 = box[3].item()
+                files[outfile].append(
+                    [frame, -1, x1, y1, x2 - x1, y2 - y1, score.item(), -1, -1, -1])
+
+        for k, v in files.items():
+            with open(k, "w") as of:
+                writer = csv.writer(of, delimiter=',')
+                for d in v:
+                    writer.writerow(d)
+
+
+class MOT_Kine2(CocoDetection):
+    def __init__(self, path_images: str, path_ann_file: str, path_detections: str, transforms, norm_transforms=None,
+                 overflow_boxes=False, remove_no_obj_imgs=False, min_num_objects=0, prev_frame_range=1,
+                 use_classes=False):
+        super(MOT_Kine2, self).__init__(path_images, path_ann_file, transforms, norm_transforms=norm_transforms,
+                                       overflow_boxes=overflow_boxes, remove_no_obj_imgs=remove_no_obj_imgs,
+                                       min_num_objects=min_num_objects)
+
+        self.prepare = ConvertCocoAnnsToTrack(overflow_boxes)
+        self.prev_frame_range = prev_frame_range
+        self._prev_frame = prev_frame_range > 0
+        self._prev_prev_frame = prev_frame_range > 1
+        self.path_detections = path_detections
+        self.sequence_ids = {seq: [] for seq in self.sequences}
+        self.sequence_dims = []
+        for id_img in self.ids:
+            image = self.coco.dataset['images'][id_img]
+            seq_name = image['file_name'].split('_')[0]
+            self.sequence_ids[seq_name] += [image['id']]
+            self.sequence_dims += [(self.coco.dataset['images'][id_img]['width'],
+                                    self.coco.dataset['images'][id_img]['height'])]
+
+        self.sequences_length = {seq: self.coco.dataset['images'][self.sequence_ids[seq][0]]['seq_length'] for seq in
+                                 self.sequences}
+        self.sequences_frame_ids = []
+        last_value = 0
+        for value in self.sequences_length.values():
+            self.sequences_frame_ids += [last_value]
+            last_value += value
+
+        self.detections_coco = COCO(path_detections)
+        if use_classes:
+            self._load_detection = self.get_detection_with_class
+        else:
+            self._load_detection = self.get_detection_without_class
+
+
+    def _get_samples_from_annotations(self, coco_anns, idx):
+        return coco_anns.loadAnns(coco_anns.getAnnIds(idx))
+
+    @property
+    def sequences(self):
+        return self.coco.dataset['sequences']
+
+    # def __len__(self):
+    #     return len(self.coco.imgs)
+
+    @property
+    def frame_range(self):
+        if 'frame_range' in self.coco.dataset:
+            return self.coco.dataset['frame_range']
+        else:
+            return {'start': 0, 'end': 1.0}
+
+    def seq_length(self, idx):
+        return self.coco.imgs[idx]['seq_length']
+
+    def sample_weight(self, idx):
+        return 1.0 / self.seq_length(idx)
+
+    def get_detection_with_class(self, idx):
+        detections = self._get_samples_from_annotations(self.detections_coco, idx)
+        bboxes = []
+        metadata = []
+        for det in detections:
+            bboxes += [det['bbox']]
+            metadata += [[det['confidence'], det['category_id']]]
+        bboxes = torch.tensor(bboxes, dtype=torch.float32).reshape([-1, 4])
+        metadata = torch.tensor(metadata, dtype=torch.float32).reshape([-1, 2])
+        return bboxes, metadata
+
+    def get_detection_without_class(self, idx):
+        detections = self._get_samples_from_annotations(self.detections_coco, idx)
+        bboxes = []
+        metadata = []
+        for det in detections:
+            bboxes += [det['bbox']]
+            metadata += [det['confidence']]
+        bboxes = torch.tensor(bboxes, dtype=torch.float32).reshape([-1, 4])
+        metadata = torch.tensor(metadata, dtype=torch.float32)[:,None]
+
+        return bboxes, metadata
+
+    def get_target(self, idx):
+        return self._get_samples_from_annotations(self.coco, idx)
+
+    def get_id_prev_frames(self, idx:int):
+        """
+        Get valid previous frames from index idx. Valid previous frames must be contained in the same video. If a video
+        starts at frame 2000, the previous valid frames for idx=2001 will be [2000,2000,2000,2000,2000]
+        @param idx: index of current frame
+        @return: Reuturn array of increasing values that include the previous frames:
+                    Ex: idx = 2112
+                    return = np.array([2107 2108 2109 2110 2111])
+
+        """
+        if not (idx in self.ids):
+            if idx < 0:
+                return self.get_id_prev_frames(self.ids[-1])
+            print('Failed index {}, trying lower value'.format(idx))
+            return self.get_id_prev_frames(idx - 1)
+
+        if idx in self.sequences_frame_ids:
+            return [idx] * self.prev_frame_range
+
+        id_check = -1
+        for seq_id in self.sequences_frame_ids:
+            if seq_id > idx:
+                break
+            id_check = seq_id
+
+        prev_ids = np.arange(- self.prev_frame_range, 0) + idx
+        return np.maximum(prev_ids, id_check)
+
+
+    def __getitem__(self, idx):
+
+        # random_state = {
+        #     'random': random.getstate(),
+        #     'torch': torch.random.get_rng_state()}
+        target = self._load_target(idx)
+        positions, metadata = self._load_detection(idx)
+
+        dims = self.sequence_dims[idx]
+
+        image_id = self.ids[idx]
+        target = {'image_id': image_id,
+                  'annotations': target}
+
+        prev_targets = []
+        idx_data = self.get_id_prev_frames(idx)
+
+        for i in idx_data:
+            prev_targets += [self._load_target(i)]
+
+        positions, target2 = self.prepare(dims, positions, target, prev_targets)
+
+        if self._transforms is not None:
+            positions, target2 = self._transforms(positions, target2)
+
+        detections, target3 = self._norm_transforms(positions, target2)
+        return detections, metadata, target3
 
     def write_result_files(self, results, output_dir, threshold=0.7):
         """Write the detections in the format for the MOT17Det sumbission
@@ -370,15 +568,15 @@ def build_mot_kine(image_set, args):
     detections_file = root / f"annotations/{split.replace('coco', 'det')}.json"
     # transforms, norm_transforms = make_coco_transforms(
     #     image_set, args.img_transform, args.overflow_boxes)
-    if args.encoding_dim_detections:
-        transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
-                                                           use_sin_encoding=True,
-                                                           dim_encoding=args.encoding_dim_detections)
-    else:
-        transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
-                                                           use_sin_encoding=True)
+    # if args.use_encoding_dets:
+    transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
+                                                       use_sin_encoding=args.use_encoding_dets,
+                                                       dim_encoding=args.encoding_dim_detections)
+    # else:
+    #     transforms, norm_transforms = make_kine_transforms(image_set, overflow_boxes=args.overflow_boxes,
+    #                                                        use_sin_encoding=True)
 
-    dataset = MOT_Kine(
+    dataset = MOT_Kine2(
         img_folder, ann_file, detections_file, transforms,
         norm_transforms=norm_transforms,
         prev_frame_range=prev_frame_range,

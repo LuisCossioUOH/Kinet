@@ -15,7 +15,7 @@ def box_xyxy_to_cxcywh(x):
 def hflip_det(det, target):
     width = target["orig_size"][1]
     # n_samples = det.size()[0]
-    detection_meta_data = det[:, 4:]
+    detection_metadata = det[:, 4:]
     flipped_det = det[:, [2, 1, 0, 3]] \
                   * torch.as_tensor([-1, 1, -1, 1]) \
                   + torch.as_tensor([width, 0, width, 0])
@@ -46,7 +46,7 @@ def hflip_det(det, target):
     if "masks" in target:
         target['masks'] = target['masks'].flip(-1)
 
-    return torch.cat([flipped_det, detection_meta_data], dim=1), target
+    return torch.cat([flipped_det, detection_metadata], dim=1), target
 
 class RandomHorizontalFlipDet:
     def __init__(self, p=0.5):
@@ -112,15 +112,17 @@ class NormalizeTarget:
 
 
 class NormalizeDetections:
-    def __init__(self,overflow_boxes):
+    def __init__(self, overflow_boxes):
         self.overflow_boxes = overflow_boxes
 
     def __call__(self, detections: torch.Tensor, target: dict = None):
         h, w = target['orig_size'][:2]
+
         detections[:, :4] = box_xyxy_to_cxcywh(detections[:, :4])
         detections[:, :4] = detections[:, :4] / torch.tensor([w, h, w, h], dtype=torch.float32)
         if not self.overflow_boxes:
-            detections[:, :5] = torch.clamp_(detections[:, :5], 0, 1)
+            detections[:, :4] = torch.clamp_(detections[:, :4], 0, 1)
+
         target['detections'] = detections
         return detections, target
 
@@ -248,15 +250,15 @@ def get_tracklet_data(target: dict, past_frames: list):
     return past_boxes
 
 
-class ConvertCocoAnnsToTrack(object):
+class ConvertCocoAnnsToTrack(object): ## TODO: DELETE
     def __init__(self, overflow_boxes=False):
         self.overflow_boxes = overflow_boxes
 
-    def __call__(self, img, detections, target, prev_anns):
+    def __call__(self, dims, detections, target, prev_anns):
 
         assert (len(prev_anns) > 1), 'Invalid Number of targets. At least 2 frames of data are required.'
         # n_det = detections.size[0]
-        w, h = img.size
+        w, h = dims
 
         image_id = target["image_id"]
         image_id = torch.tensor([image_id])
@@ -286,13 +288,12 @@ class ConvertCocoAnnsToTrack(object):
             if num_keypoints:
                 keypoints = keypoints.view(num_keypoints, -1, 3)
 
-        keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
+        # keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
+        # boxes = boxes[keep]
+        # classes = classes[keep]
 
-        boxes = boxes[keep]
-        classes = classes[keep]
-
-        if keypoints is not None:
-            keypoints = keypoints[keep]
+        # if keypoints is not None:
+        #     keypoints = keypoints[keep]
 
         target = {}
         target["boxes"] = boxes
@@ -304,7 +305,7 @@ class ConvertCocoAnnsToTrack(object):
 
         if anno and "track_id" in anno[0]:
             track_ids = torch.tensor([obj["track_id"] for obj in anno])
-            target["track_ids"] = track_ids[keep]
+            target["track_ids"] = track_ids  # track_ids[keep]
         elif not len(boxes):
             target["track_ids"] = torch.empty(0)
 
@@ -313,11 +314,11 @@ class ConvertCocoAnnsToTrack(object):
         iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
         ignore = torch.tensor([obj["ignore"] if "ignore" in obj else 0 for obj in anno])
 
-        target["area"] = area[keep]
+        target["area"] = area  # area[keep]
         # target["heigth"] = h
         # target["width"] = w
-        target["iscrowd"] = iscrowd[keep]
-        target["ignore"] = ignore[keep]
+        target["iscrowd"] = iscrowd  # iscrowd[keep]
+        target["ignore"] = ignore  # ignore[keep]
 
         target["orig_size"] = torch.as_tensor([int(h), int(w)])
         target["size"] = torch.as_tensor([int(h), int(w)])

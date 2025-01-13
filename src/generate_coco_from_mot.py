@@ -349,6 +349,7 @@ def generate_det_json_from_mot(split_name='train', seqs_names=None,
         for img_dict in detections['images']}
 
     seq_annotations_per_frame = {}
+    detection_id = 0
     for seq in seqs:
         # GT FILE
         dt_file_path = os.path.join(root_split_path, seq, 'det', 'det.txt')
@@ -362,8 +363,7 @@ def generate_det_json_from_mot(split_name='train', seqs_names=None,
         #     continue
 
         seq_detections = []
-
-        detection_id = 0
+        # detection_id = 0
         with open(dt_file_path, "r") as dt_file:
             reader = csv.reader(dt_file, delimiter=' ' if mots else ',')
 

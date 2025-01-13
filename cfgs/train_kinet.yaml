@@ -1,18 +1,31 @@
 #kine: True
 dataset: mot_kine
-kinet: True
+kine: True
 output_dir: 'models/kinet'
 
-position_embedding: detection
+position_embedding: sine
 # DETR features
 multi_frame_encoding: True # True if track_prev_frame_range > 0
-track_prev_frame_range: 4
+track_prev_frame_range: 5
+use_encoding_tracklets: False
+use_encoding_dets: False
 encoding_dim_detections: 32
 encoding_dim_tracklets: 8
-use_encoding_tracklets: True
+
 track_query_false_negative_prob: 0.2
-num_queries: 500
+num_queries: 150
 hidden_dim: 288
 activation: relu
 
-resume: ''
+batch_size: 8
+epochs: 500
+lr_drop: 50
+lr_linear_proj_mult: 0.5
+lr: 0.0001
+
+dec_layers: 1
+enc_layers: 1
+
+
+
+resume: '' # resume:'models/mot17_kinet_multi_frame_dummy/checkpoint_epoch_270.pth'

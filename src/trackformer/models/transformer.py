@@ -51,12 +51,11 @@ class Transformer(nn.Module):
     def forward(self, src, mask, query_embed, pos_embed, tgt=None, prev_frame=None):
         # flatten BSxCxHxW to BSxCxHW
         bs, c, h, w = src.shape
-        src = src.flatten(2).permute(2, 0, 1) # permute BSxCxHW to HWxBSxC
+        src = src.flatten(2).permute(2, 0, 1)  # permute BSxCxHW to HWxBSxC
 
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
 
-
-         # pos_embed = [flatten_dim,batch_size,n_frames] = []
+        # pos_embed = [flatten_dim,batch_size,n_frames] = []
         mask = mask.flatten(1)
 
         if tgt is None:
@@ -84,28 +83,162 @@ class Transformer(nn.Module):
                 hs_without_norm.transpose(1, 2),
                 memory.permute(1, 2, 0).view(bs, c, h, w))
 
-class Kinematic_transformer(Transformer):
 
-    def forward(self, src, mask, query_embed, tgt=None, prev_frame=None):
-        bs, n_det, c = src.shape
+class KinematicTransformer(nn.Module):
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
+                 num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 return_intermediate_dec=False,  ### TODO: REMOVE UNUSED KWARGS
+                 track_attention=False):
+
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        decoder_norm = nn.LayerNorm(d_model)
+        self.decoder = TransformerDecoder(
+            decoder_layer, encoder_layer, num_decoder_layers, decoder_norm,
+            return_intermediate=return_intermediate_dec,
+            track_attention=track_attention)
+
+        self._reset_parameters()
+
+        # self.linear1 = nn.Linear(d_model, d_model)
+        # self.dropout = nn.Dropout(dropout)
+        # self.linear2 = nn.Linear(d_model, d_model)
+        # self.norm = nn.LayerNorm(d_model)
+        # self.activation_out = _get_activation_fn(activation)
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src, mask, query_embed, tgt=None, pos_src=None):
+        # bs, n_det, c = src.shape
         src = src.permute(1, 0, 2)  # permute BSxTxC to TxBSxC
-
-         # pos_embed = [flatten_dim,batch_size,n_frames] = []
+        if not (pos_src is None):
+            pos_src = pos_src.permute(1, 0, 2)
+        # pos_embed = [flatten_dim,batch_size,n_frames] = []
         # mask = mask.flatten(2)
 
         if tgt is None:
             tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=None)
-
+        # pos_src = self.norm(self.linear2(self.dropout(self.activation_out(self.linear1(src)))))
+        # pos = None
+        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_src)
 
         hs, hs_without_norm = self.decoder(tgt, memory, memory_key_padding_mask=mask,
-                                           pos=None, query_pos=query_embed,
-                                           prev_frame=prev_frame)
+                                           pos=pos_src, query_pos=query_embed)
 
-        return (hs.transpose(1, 2),
-                hs_without_norm.transpose(1, 2),
-                memory.permute(1, 2, 0).view(bs, c, n_det))
+        return (hs,
+                hs_without_norm,
+                memory)
 
+
+class DualKinematicTransformer(nn.Module):
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
+                 num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 return_intermediate_dec=False,
+                 track_attention=False):
+        super().__init__()
+
+        self.d_model = d_model
+
+        self.transformer_det = KinematicTransformer(d_model, nhead, num_encoder_layers, num_decoder_layers,
+                                                    dim_feedforward, dropout,
+                                                    activation, normalize_before, return_intermediate_dec,
+                                                    track_attention)
+        self.transformer_metadata = KinematicTransformer(d_model, nhead, num_encoder_layers, num_decoder_layers,
+                                                         dim_feedforward, dropout,
+                                                         activation, normalize_before, return_intermediate_dec,
+                                                         track_attention)
+
+        self.detection_branch = IntertwinedBranch(d_model, dropout, activation)
+
+        self.metadata_branch = IntertwinedBranch(d_model, dropout, activation)
+
+    def forward(self, src_boxes, src_metadata, mask, query_embed_bbox, query_embed_metadata, tgt_bboxes, tgt_metadata,
+                pos_boxes=None, pos_metadata=None):
+        # bs, n_det, c = src_boxes.shape
+        hs_det, hs_without_norm_det, memory_det = self.transformer_det(src_boxes, mask=mask,
+                                                                       query_embed=query_embed_bbox,
+                                                                       tgt=tgt_bboxes,
+                                                                       pos_src=pos_boxes)
+
+        hs_metadata, hs_without_norm_metadata, memory_metadata = self.transformer_metadata(src_metadata, mask=mask,
+                                                                                           query_embed=query_embed_metadata,
+                                                                                           tgt=tgt_metadata,
+                                                                                           pos_src=pos_metadata)
+
+        hs_det = self.detection_branch(hs_det, hs_metadata)
+        hs_metadata = self.metadata_branch(hs_metadata, hs_det)
+        return (hs_det.transpose(1, 2), hs_metadata.transpose(1, 2),
+                hs_without_norm_det.transpose(1, 2),
+                memory_det.permute(1, 0, 2))
+
+
+class DualKinematicEncoder(nn.Module):
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
+                 dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 ):
+        super().__init__()
+
+        self.d_model = d_model
+        encoder_layer_det = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                    dropout, activation, normalize_before)
+        encoder_norm_det = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder_det = TransformerEncoder(encoder_layer_det, num_encoder_layers, encoder_norm_det)
+
+        encoder_layer_meta = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                     dropout, activation, normalize_before)
+
+        encoder_norm_meta = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder_meta = TransformerEncoder(encoder_layer_meta, num_encoder_layers, encoder_norm_meta)
+
+        self.detection_branch = IntertwinedBranch(d_model, dropout, activation, dim_concat=2)
+
+        self.metadata_branch = IntertwinedBranch(d_model, dropout, activation, dim_concat=2)
+
+    def forward(self, src_boxes, src_metadata, mask, query_embed_bbox, query_embed_metadata, tgt_bboxes, tgt_metadata,
+                pos_boxes=None, pos_metadata=None):
+        bs, n_det, c = src_boxes.shape
+
+        src_boxes = src_boxes.permute(1, 0, 2)  # permute BSxTxC to TxBSxC
+        if not (pos_boxes is None):
+            pos_boxes = pos_boxes.permute(1, 0, 2)
+        # pos_embed = [flatten_dim,batch_size,n_frames] = []
+        # mask = mask.flatten(2)
+
+        # if tgt_bboxes is None:
+        #     tgt_bboxes = torch.zeros_like(query_embed_bbox)
+
+        memory_det = self.encoder_det(src_boxes, src_key_padding_mask=mask, pos=pos_boxes)
+
+
+        src_metadata = src_metadata.permute(1, 0, 2)  # permute BSxTxC to TxBSxC
+        if not (pos_boxes is None):
+            pos_metadata = pos_metadata.permute(1, 0, 2)
+        # pos_embed = [flatten_dim,batch_size,n_frames] = []
+        # mask = mask.flatten(2)
+
+        # if tgt_metadata is None:
+        #     tgt_metadata = torch.zeros_like(query_embed_metadata)
+        memory_metadata = self.encoder_meta(src_metadata, src_key_padding_mask=mask, pos=pos_metadata)
+
+        hs_det = self.detection_branch(memory_det, memory_metadata)
+        hs_metadata = self.metadata_branch(memory_metadata, memory_det)
+        return (hs_det.transpose(0, 1)[None], hs_metadata.transpose(0, 1)[None],
+                memory_metadata.permute(1, 2, 0),
+                memory_det.permute(1, 2, 0))
 
 
 class TransformerEncoder(nn.Module):
@@ -336,6 +469,24 @@ class TransformerDecoderLayer(nn.Module):
                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
 
 
+class IntertwinedBranch(nn.Module):
+    def __init__(self, d_model=256, dropout=0.1, activation='relu', dim_concat=3):
+        super().__init__()
+        self.linear_input1 = nn.Linear(d_model, d_model // 2)
+        self.linear_input2 = nn.Linear(d_model, d_model // 2)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_model // 2, d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.activation = _get_activation_fn(activation)
+        self.dim_concat = dim_concat
+
+    def forward(self, src1, src2):
+        x1 = self.linear_input1(src1)
+        x2 = self.linear_input2(src2)
+        x = self.activation(torch.cat([x1, x2], dim=self.dim_concat))
+        return self.norm(self.dropout(x) + src1)
+
+
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
@@ -352,18 +503,28 @@ def _get_activation_fn(activation):
 
 
 def build_transformer(args):
-    if args.kinet:
-        return Kinematic_transformer(
-        d_model=args.hidden_dim,
-        nhead=args.nheads,
-        num_encoder_layers=args.enc_layers,
-        num_decoder_layers=args.dec_layers,
-        dim_feedforward=args.dim_feedforward,
-        dropout=args.dropout,
-        activation=args.activation,
-        normalize_before=args.pre_norm,
-        return_intermediate_dec=True,
-        track_attention=args.track_attention)
+    if args.kine:
+        if args.use_encoder_only:
+            return DualKinematicEncoder(
+                d_model=args.hidden_dim,
+                nhead=args.nheads,
+                num_encoder_layers=args.enc_layers,
+                dim_feedforward=args.dim_feedforward,
+                dropout=args.dropout,
+                activation=args.activation,
+                normalize_before=args.pre_norm,)
+        else:
+            return DualKinematicTransformer(
+                d_model=args.hidden_dim,
+                nhead=args.nheads,
+                num_encoder_layers=args.enc_layers,
+                num_decoder_layers=args.dec_layers,
+                dim_feedforward=args.dim_feedforward,
+                dropout=args.dropout,
+                activation=args.activation,
+                normalize_before=args.pre_norm,
+                return_intermediate_dec=True,
+                track_attention=args.track_attention)
     return Transformer(
         d_model=args.hidden_dim,
         nhead=args.nheads,

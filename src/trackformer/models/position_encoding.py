@@ -149,11 +149,49 @@ class PositionEmbeddingLearned(nn.Module):
         return pos
 
 
+class PositionEmbeddingSineDetections(nn.Module):
+    """
+    This is a more standard version of the position embedding, very similar to the one
+    used by the Attention is all you need paper, generalized to work on detections batches [batch_size, n_dets, dim_det].
+    """
+
+    def __init__(self, num_pos_feats=64, temperature=10000, scale=None, max_detections=60):
+        super().__init__()
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        if scale is None:
+            scale = 2 * math.pi
+        self.scale = scale
+        self.max_detections = max_detections
+
+    def forward(self, tensor_list: NestedTensor):
+        mask = tensor_list.mask
+        x = tensor_list.tensors
+
+        not_mask = ~mask
+        # Cap up to a maximum number of detections
+        y_embed = not_mask.cumsum(1, dtype=torch.float32) % self.max_detections
+
+        # eps = 1e-6
+        y_embed = (y_embed - 0.5) / (self.max_detections) * self.scale
+
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (dim_t / self.num_pos_feats)
+
+        pos_y = y_embed[:, :, None] / dim_t
+        pos_y = torch.stack((pos_y.sin(), pos_y.cos()), dim=3).flatten(2)
+
+        return pos_y
+
+
 def build_position_encoding(args):
     # n_steps = args.hidden_dim // 2
     # n_steps = args.hidden_dim // 4
 
-    if args.multi_frame_attention and args.multi_frame_encoding:
+    if args.kine:
+        n_steps = args.hidden_dim // 2
+        sine_emedding_func = PositionEmbeddingSineDetections
+    elif args.multi_frame_attention and args.multi_frame_encoding:
         n_steps = args.hidden_dim // 3
         sine_emedding_func = PositionEmbeddingSine3D
     else:
@@ -163,8 +201,10 @@ def build_position_encoding(args):
     if args.position_embedding in ('v2', 'sine'):
         # TODO find a better way of exposing other arguments
         position_embedding = sine_emedding_func(n_steps, normalize=True)
-    elif args.position_embedding in 'detection':
-        position_embedding = sine_emedding_func(n_steps)
+
+    elif args.position_embedding == 'sine_detection':
+        position_embedding = sine_emedding_func(n_steps,
+                                                max_detections=args.num_queries // args.ratio_prediction2detection)
 
     elif args.position_embedding in ('v3', 'learned'):
         position_embedding = PositionEmbeddingLearned(n_steps)

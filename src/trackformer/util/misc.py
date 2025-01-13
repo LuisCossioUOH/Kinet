@@ -297,6 +297,85 @@ def collate_fn(batch):
     return tuple(batch)
 
 
+
+
+def collate_data1(tensor_list:list):
+    """
+    Collate detection samples
+    @param tensor_list: List of tensor [torch.tensor([n_dets, dim_dets],dtype=float)], were dim_dets is either 4 or
+    and encoded dimension.
+    @return:
+    """
+    max_size = _max_by_axis([list(det.shape) for det in tensor_list])
+
+
+    batch_shape = [len(tensor_list)] + max_size
+    b, tokens, feature_dim = batch_shape
+    dtype = tensor_list[0].dtype
+    device = tensor_list[0].device
+    tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
+    mask = torch.ones((b, tokens), dtype=torch.bool, device=device)
+
+    for dets, pad_det, m in zip(tensor_list, tensor, mask):
+        pad_det[: dets.shape[0], : dets.shape[1]].copy_(dets)
+        m[: dets.shape[0]] = False
+
+    return NestedTensor(tensor, mask)
+
+def collate_data2(tensor_list):
+    """
+    Collate detection samples with and empty detection at the beginning.
+    @param tensor_list: List of tensor [torch.tensor([n_dets, dim_dets],dtype=float)], were dim_dets is either 4 or
+    and encoded dimension.
+    @return:
+    """
+    max_size = _max_by_axis([list(det.shape) for det in tensor_list])
+
+    max_size[0] += 1
+    batch_shape = [len(tensor_list)] + max_size
+    b, tokens, feature_dim = batch_shape
+    dtype = tensor_list[0].dtype
+    device = tensor_list[0].device
+    tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
+    mask = torch.ones((b, tokens), dtype=torch.bool, device=device)
+
+    for dets, pad_det, m in zip(tensor_list, tensor, mask):
+        pad_det[1: dets.shape[0] + 1, : dets.shape[1]].copy_(dets)
+        m[: dets.shape[0] + 1] = False
+
+    return NestedTensor(tensor, mask)
+
+
+
+
+def get_kinet_collate_function(use_empty_start, use_images=False):
+    if use_images: ## TODO: FIX and test this
+        train_function = collate_fn_multi_items(collate_data2, collate_data2, nested_tensor_from_tensor_list)
+        val_function = collate_fn_multi_items(collate_data2, collate_data2, nested_tensor_from_tensor_list)
+
+    elif use_empty_start:
+        train_function = collate_fn_multi_items(collate_data2, collate_data2)
+        val_function = collate_fn_multi_items(collate_data2, collate_data2)
+    else:
+        train_function = collate_fn_multi_items(collate_data1, collate_data1)
+        val_function = collate_fn_multi_items(collate_data1, collate_data1)
+    return train_function, val_function
+
+
+class collate_fn_multi_items:
+    def __init__(self, *collate_methods):
+        self.collate_methods = collate_methods
+        self.n_inputs = len(collate_methods)
+
+    def __call__(self, batch):
+        batch = list(zip(*batch))
+        result = []
+        for i in range(self.n_inputs):
+            result += [self.collate_methods[i](batch[i])]
+
+        return NestedTensorKinet(*result), batch[-1]
+
+
 def _max_by_axis(the_list):
     # type: (List[List[int]]) -> List[int]
     maxes = the_list[0]
@@ -304,7 +383,6 @@ def _max_by_axis(the_list):
         for index, item in enumerate(sublist):
             maxes[index] = max(maxes[index], item)
     return maxes
-
 
 def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
     # TODO make this more general
@@ -321,22 +399,10 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
         for img, pad_img, m in zip(tensor_list, tensor, mask):
             pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
             m[: img.shape[1], :img.shape[2]] = False
-    elif tensor_list[0].ndim == 2:
-        max_size = _max_by_axis([list(img.shape) for img in tensor_list])
-        # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
-        batch_shape = [len(tensor_list)] + max_size
-        b, tokens, feature_dim = batch_shape
-        dtype = tensor_list[0].dtype
-        device = tensor_list[0].device
-        tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
-        mask = torch.ones((b, tokens), dtype=torch.bool, device=device)
-        for img, pad_img, m in zip(tensor_list, tensor, mask):
-            pad_img[: img.shape[0], : img.shape[1]].copy_(img)
-            m[: img.shape[0]] = False
+
     else:
         raise ValueError('not supported')
     return NestedTensor(tensor, mask)
-
 
 class NestedTensor(object):
     def __init__(self, tensors, mask: Optional[Tensor] = None):
@@ -375,6 +441,22 @@ class NestedTensor(object):
             tensor = tensor[:, :w_index[0], :]
 
         return tensor
+
+class NestedTensorKinet(object):
+    def __init__(self, detections, metadata, img=None):
+        self.detections = detections
+        self.metadata = metadata
+        # self.img = img
+
+    def to(self, device):
+        detections = self.detections.to(device)
+        metadata = self.metadata.to(device)
+
+        return NestedTensorKinet(detections, metadata)
+
+
+    def __repr__(self):
+        return str(self.detections) + '\n '+ str(self.metadata)
 
 
 def setup_for_distributed(is_master):

@@ -9,7 +9,7 @@ import sys
 from typing import Iterable
 
 import torch
-from track import ex
+# from track import ex
 
 from .datasets import get_coco_api_from_dataset
 from .datasets.coco_eval import CocoEvaluator
@@ -119,10 +119,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, epoch)):
         samples = samples.to(device)
         targets = [utils.nested_dict_to_device(t, device) for t in targets]
-        # print(i)
-        # in order to be able to modify targets inside the forward call we need
-        # to pass it through as torch.nn.parallel.DistributedDataParallel only
-        # passes copies
+
         # print('image: ',samples.tensors.size())
         outputs, targets, *_ = model(samples, targets)
 
@@ -168,8 +165,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
                 results[0],
                 targets[0],
                 args.tracking)
-        if i > 50:
-            break
+        # if i > 50:  # DELETE
+        #     break
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -203,6 +201,7 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
         )
 
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 'Test:')):
+
         samples = samples.to(device)
         targets = [utils.nested_dict_to_device(t, device) for t in targets]
         outputs, targets, *_ = model(samples, targets)
@@ -254,7 +253,8 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
                 res_pano[j]["file_name"] = file_name
 
             panoptic_evaluator.update(res_pano)
-
+    # if i > 50:  # DELETE
+    #     break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -323,7 +323,12 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
             'dataset_name': dataset_name,
             'frame_range': data_loader.dataset.frame_range,
             'obj_detector_model': obj_detector_model}
-        run = ex.run(config_updates=config_updates)
+
+        if args.kine:
+            run = ex.run(named_configs=['kinet_track'], config_updates=config_updates)
+
+        else:
+            run = ex.run(config_updates=config_updates)
 
         mot_accums = utils.all_gather(run.result)[:len(seqs)]
         mot_accums = [item for sublist in mot_accums for item in sublist]
@@ -356,4 +361,4 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
     if args.debug:
         exit()
 
-    return eval_stats, coco_evaluator
+    return eval_stats, coco_evaluator, stats
