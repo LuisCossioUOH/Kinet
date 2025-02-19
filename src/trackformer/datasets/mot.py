@@ -406,7 +406,7 @@ class MOT_Kine2(CocoDetection):
         Get valid previous frames from index idx. Valid previous frames must be contained in the same video. If a video
         starts at frame 2000, the previous valid frames for idx=2001 will be [2000,2000,2000,2000,2000]
         @param idx: index of current frame
-        @return: Reuturn array of increasing values that include the previous frames:
+        @return: Return array of increasing values that include the previous frames:
                     Ex: idx = 2112
                     return = np.array([2107 2108 2109 2110 2111])
 
@@ -456,6 +456,8 @@ class MOT_Kine2(CocoDetection):
             positions, target2 = self._transforms(positions, target2)
 
         detections, target3 = self._norm_transforms(positions, target2)
+        target3['detections'] = detections
+        target3['detections_metadata'] = metadata
         return detections, metadata, target3
 
     def write_result_files(self, results, output_dir, threshold=0.7):

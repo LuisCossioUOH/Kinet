@@ -204,7 +204,7 @@ def build_position_encoding(args):
 
     elif args.position_embedding == 'sine_detection':
         position_embedding = sine_emedding_func(n_steps,
-                                                max_detections=args.num_queries // args.ratio_prediction2detection)
+                                                max_detections=args.max_number_detection)
 
     elif args.position_embedding in ('v3', 'learned'):
         position_embedding = PositionEmbeddingLearned(n_steps)

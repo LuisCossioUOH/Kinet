@@ -8,7 +8,7 @@ from .detr import DETR, PostProcess, SetCriterion
 from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
                                 DETRSegm, DETRSegmTracking,
                                 PostProcessPanoptic, PostProcessSegm)
-from .detr_tracking import DeformableDETRTracking, DETRTracking, KinetTracking
+from .detr_tracking import DeformableDETRTracking, DETRTracking, KinetTracking, KinetTracking2
 from .matcher import build_matcher, BasicBoxHungarianMatcher
 from .transformer import build_transformer
 
@@ -74,16 +74,20 @@ def build_model(args):
         # detr_kwargs['multi_frame_encoding'] = args.multi_frame_encoding
         # detr_kwargs['merge_frame_features'] = args.merge_frame_features
         transformer = build_transformer(args)
-        detr_kwargs['transformer'] = transformer
-        if args.use_encoding_tracklets:
-            detr_kwargs['dim_tracklets_det'] = 4 * args.encoding_dim_tracklets * args.track_prev_frame_range
-        else:
-            detr_kwargs['dim_tracklets_det'] = 4 * args.track_prev_frame_range
 
         if args.use_class:
             detr_kwargs['dim_tracklets_metadata'] = 2
         else:
             detr_kwargs['dim_tracklets_metadata'] = 1
+
+        if args.use_encoding_tracklets:
+            detr_kwargs['dim_tracklets_det'] = 4 * args.encoding_dim_tracklets * args.track_prev_frame_range
+
+            detr_kwargs['dim_tracklets_metadata'] = detr_kwargs['dim_tracklets_metadata'] * args.encoding_dim_tracklets \
+                                                    * args.track_prev_frame_range
+        else:
+            detr_kwargs['dim_tracklets_det'] = 4 * args.track_prev_frame_range
+            detr_kwargs['dim_tracklets_metadata'] = detr_kwargs['dim_tracklets_metadata'] * args.track_prev_frame_range
 
         tracking_kwargs['use_encoding'] = args.use_encoding_tracklets
         tracking_kwargs['frame_range'] = args.track_prev_frame_range
@@ -95,7 +99,13 @@ def build_model(args):
                                                               use_class=False)
 
         if args.tracking:
-            model = KinetTracking(tracking_kwargs, detr_kwargs)
+            if args.use_encoder_only:
+                detr_kwargs['encoder'] = transformer
+                model = KinetTracking2(tracking_kwargs, detr_kwargs)
+            else:
+                detr_kwargs['transformer'] = transformer
+                model = KinetTracking(tracking_kwargs, detr_kwargs)
+
         else:
             raise("ERROR: Kine model only implemented as tracking model")
     else:

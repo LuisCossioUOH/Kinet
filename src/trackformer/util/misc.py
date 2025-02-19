@@ -349,7 +349,7 @@ def collate_data2(tensor_list):
 
 
 def get_kinet_collate_function(use_empty_start, use_images=False):
-    if use_images: ## TODO: FIX and test this
+    if use_images: ## TODO: test this
         train_function = collate_fn_multi_items(collate_data2, collate_data2, nested_tensor_from_tensor_list)
         val_function = collate_fn_multi_items(collate_data2, collate_data2, nested_tensor_from_tensor_list)
 

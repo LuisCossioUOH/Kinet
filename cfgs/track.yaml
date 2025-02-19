@@ -12,6 +12,7 @@ load_results_dir: null
 # dataset (look into src/datasets/tracking/factory.py)
 dataset_name: MOT17-ALL-ALL
 data_root_dir: /home/luis/2024/MOT/vid # data
+sequence_names: []
 
 # [False, 'debug', 'pretty']
 # compile video with: `ffmpeg -f image2 -framerate 15 -i %06d.jpg -vcodec libx264 -y movie.mp4 -vf scale=320:-1`

@@ -116,14 +116,14 @@ class NormalizeDetections:
         self.overflow_boxes = overflow_boxes
 
     def __call__(self, detections: torch.Tensor, target: dict = None):
-        h, w = target['orig_size'][:2]
+        n_dets, w = target['orig_size'][:2]
 
         detections[:, :4] = box_xyxy_to_cxcywh(detections[:, :4])
-        detections[:, :4] = detections[:, :4] / torch.tensor([w, h, w, h], dtype=torch.float32)
+        detections[:, :4] = detections[:, :4] / torch.tensor([w, n_dets, w, n_dets], dtype=torch.float32)
         if not self.overflow_boxes:
             detections[:, :4] = torch.clamp_(detections[:, :4], 0, 1)
 
-        target['detections'] = detections
+        # target['detections'] = detections
         return detections, target
 
 
@@ -250,7 +250,7 @@ def get_tracklet_data(target: dict, past_frames: list):
     return past_boxes
 
 
-class ConvertCocoAnnsToTrack(object): ## TODO: DELETE
+class ConvertCocoAnnsToTrack(object):
     def __init__(self, overflow_boxes=False):
         self.overflow_boxes = overflow_boxes
 

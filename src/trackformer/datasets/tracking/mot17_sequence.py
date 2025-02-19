@@ -17,8 +17,6 @@ from torch.utils.data import Dataset
 from ..coco import make_coco_transforms
 from ..transforms import Compose
 
-from trackformer.datasets.kinematic_utils import DetectionsEncoderSine
-
 class MOT17Sequence(Dataset):
     """Multiple Object Tracking (MOT17) Dataset.
 
@@ -272,61 +270,3 @@ class MOT17Sequence(Dataset):
 
         return results
 
-class MOT17SequenceKinet(MOT17Sequence):
-    data_folder = 'MOT17'
-
-    def __init__(self, root_dir:str, det_transform: DetectionsEncoderSine, seq_name: Optional[str] = None,
-                 dets: str = '', vis_threshold: float = 0.0, img_transform: Namespace = None) -> None:
-        """
-        Args:
-            seq_name (string): Sequence to take
-            vis_threshold (float): Threshold of visibility of persons
-                                   above which they are selected
-        """
-        super().__init__(root_dir, seq_name, dets, vis_threshold, img_transform)
-
-        # self._seq_name = seq_name
-        # self._dets = dets
-        # self._vis_threshold = vis_threshold
-        #
-        # self._data_dir = osp.join(root_dir, self.data_folder)
-        #
-        # self._train_folders = os.listdir(os.path.join(self._data_dir, 'train'))
-        # self._test_folders = os.listdir(os.path.join(self._data_dir, 'test'))
-        #
-        # self.transforms = Compose(make_coco_transforms('val', img_transform, overflow_boxes=True))
-        #
-        # self.data = []
-        # self.no_gt = True
-        self.det_transform = det_transform
-        # if seq_name is not None:
-        #     full_seq_name = seq_name
-        #     if self._dets is not None:
-        #         full_seq_name = f"{seq_name}-{dets}"
-        #     assert full_seq_name in self._train_folders or full_seq_name in self._test_folders, \
-        #         'Image set does not exist: {}'.format(full_seq_name)
-        #
-        #     self.data = self._sequence()
-        #
-        #     self.no_gt = not osp.exists(self.get_gt_file_path())
-
-    def __getitem__(self, idx: int) -> dict:
-        """Return the ith image converted to blob"""
-        data = self.data[idx]
-        img = Image.open(data['im_path']).convert("RGB")
-        width_orig, height_orig = img.size
-
-        img, _ = self.transforms(img)
-        width, height = img.size(2), img.size(1)
-
-        sample = {}
-        sample['img'] = img
-        sample['orig_size'] = torch.as_tensor([int(height_orig), int(width_orig)])
-        dets, sample = self.det_transform(torch.tensor(np.array([det[:5] for det in data['dets']])), sample)
-        sample['dets'] = dets
-        sample['img_path'] = data['im_path']
-        sample['gt'] = data['gt']
-        sample['vis'] = data['vis']
-        sample['size'] = torch.as_tensor([int(height), int(width)])
-
-        return sample

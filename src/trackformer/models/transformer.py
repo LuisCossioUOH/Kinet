@@ -78,10 +78,10 @@ class Transformer(nn.Module):
         hs, hs_without_norm = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                                            pos=pos_embed, query_pos=query_embed,
                                            prev_frame=prev_frame)
-
+        # hs [n_levels, num_queries, batch_size, hidden_dim] -> [n_levels, batch_size, num_queries, hidden_dim]
         return (hs.transpose(1, 2),
                 hs_without_norm.transpose(1, 2),
-                memory.permute(1, 2, 0).view(bs, c, h, w))
+                memory.permute(1, 2, 0).view(bs, c, h, w)) # memory [flatten_dim, batch_size, hidden_dim] -> [batch_size, hidden_dim, height, width]
 
 
 class KinematicTransformer(nn.Module):
@@ -208,20 +208,16 @@ class DualKinematicEncoder(nn.Module):
 
         self.metadata_branch = IntertwinedBranch(d_model, dropout, activation, dim_concat=2)
 
-    def forward(self, src_boxes, src_metadata, mask, query_embed_bbox, query_embed_metadata, tgt_bboxes, tgt_metadata,
-                pos_boxes=None, pos_metadata=None):
-        bs, n_det, c = src_boxes.shape
+    def forward(self, src_boxes, src_metadata, mask, pos_boxes=None, pos_metadata=None):
+
 
         src_boxes = src_boxes.permute(1, 0, 2)  # permute BSxTxC to TxBSxC
         if not (pos_boxes is None):
             pos_boxes = pos_boxes.permute(1, 0, 2)
-        # pos_embed = [flatten_dim,batch_size,n_frames] = []
-        # mask = mask.flatten(2)
 
-        # if tgt_bboxes is None:
-        #     tgt_bboxes = torch.zeros_like(query_embed_bbox)
-
-        memory_det = self.encoder_det(src_boxes, src_key_padding_mask=mask, pos=pos_boxes)
+        memory_det = self.encoder_det(src_boxes, src_key_padding_mask=mask,
+                                      pos=pos_boxes
+                                      )
 
 
         src_metadata = src_metadata.permute(1, 0, 2)  # permute BSxTxC to TxBSxC
@@ -232,7 +228,9 @@ class DualKinematicEncoder(nn.Module):
 
         # if tgt_metadata is None:
         #     tgt_metadata = torch.zeros_like(query_embed_metadata)
-        memory_metadata = self.encoder_meta(src_metadata, src_key_padding_mask=mask, pos=pos_metadata)
+        memory_metadata = self.encoder_meta(src_metadata, src_key_padding_mask=mask,
+                                            pos=pos_metadata
+                                            )
 
         hs_det = self.detection_branch(memory_det, memory_metadata)
         hs_metadata = self.metadata_branch(memory_metadata, memory_det)

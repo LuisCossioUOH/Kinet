@@ -16,12 +16,14 @@ clip_max_norm: 0.1
 deformable: false
 # Kinematic model
 kine: false
+used_ordered_queries: false
 use_empty_start: false
 use_encoder_only: false
 use_encoding_tracklets: false
 use_encoding_dets: false
 encoding_dim_detections: 32
 encoding_dim_tracklets: 32
+max_number_detection: 60
 use_class: False
 ratio_add_tracklets: 1.0
 #length_sequence_detections: 40

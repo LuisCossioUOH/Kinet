@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from trackformer.datasets.tracking import TrackDatasetFactory, TrackDatasetFactoryKinet
 from trackformer.models import build_model
-from trackformer.models.tracker import Tracker, Tracker_Kinet
+from trackformer.models.tracker import Tracker, TrackerKinematic
 from trackformer.util.misc import nested_dict_to_namespace
 from trackformer.datasets.kinematic_utils import DetectionsEncoderSine, IdentityDetectionEncoder
 from trackformer.util.track_utils import (evaluate_mot_accums, get_mot_accum,
@@ -102,7 +102,7 @@ def main(seed, dataset_name, obj_detect_checkpoint_file, tracker_cfg,
     if verbose:
         track_logger = _log.info
     if obj_detect_args.kine:
-        tracker = Tracker_Kinet(
+        tracker = TrackerKinematic(
             obj_detector, obj_detector_post, tracker_cfg,obj_detect_args,
             generate_attention_maps, track_logger, verbose)
     else:
